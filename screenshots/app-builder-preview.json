@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "BorderShield",
+      "hasCanvas": false,
+      "bodyTextLen": 1284,
+      "bodyTextHash": "c24831d0ac0ea1f6614470b258c5d1b80baecb6285b584407fd52eff1bc0c1a5",
+      "bodyTextPrefix": "BorderShield AI SECURITY Overview Verify document Case history W",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "BorderShield",
+      "hasCanvas": false,
+      "bodyTextLen": 1100,
+      "bodyTextHash": "c58e098aa8212f29a57bc3be626b03d5f2eff8db72b3d33669730896bbc39dfb",
+      "bodyTextPrefix": "OFFICER WORKSPACE / CHECKPOINT 04 AK Verification overview AI-as",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}

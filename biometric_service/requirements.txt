@@ -1,0 +1,7 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+numpy>=2.1
+opencv-python>=4.10
+scikit-learn>=1.7
+joblib>=1.4
+python-multipart>=0.0.20
