@@ -160,7 +160,7 @@ export const useAppStore = create<AppState>()(
       cases: SEED_CASES,
       watchlist: SEED_WATCHLIST,
       settings: {
-        officerName: "Arnab K.",
+        officerName: "Sayan Debnath",
         officerRole: "Checkpoint officer",
         checkpoint: "Checkpoint 04",
         autoHoldWatchlist: true,

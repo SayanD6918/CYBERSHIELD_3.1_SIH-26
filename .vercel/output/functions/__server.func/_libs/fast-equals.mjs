@@ -55,6 +55,7 @@ function sameValueZeroEqual(a, b) {
 var PREACT_VNODE = "__v";
 var PREACT_OWNER = "__o";
 var REACT_OWNER = "_owner";
+var HAS_FLOAT_16_ARRAY = typeof Float16Array !== "undefined";
 var { getOwnPropertyDescriptor, keys } = Object;
 /**
 * Whether the array buffers are equal in value.
@@ -86,8 +87,8 @@ function areDatesEqual(a, b) {
 /**
 * Whether the errors passed are equal in value.
 */
-function areErrorsEqual(a, b) {
-	return a.name === b.name && a.message === b.message && a.cause === b.cause && a.stack === b.stack;
+function areErrorsEqual(a, b, state) {
+	return a.name === b.name && a.message === b.message && a.stack === b.stack && state.equals(a.cause, b.cause, "cause", "cause", a, b, state);
 }
 /**
 * Whether the functions passed are equal in value.
@@ -208,8 +209,12 @@ function areSetsEqual(a, b, state) {
 * Whether the TypedArray instances are equal in value.
 */
 function areTypedArraysEqual(a, b) {
-	let index = a.byteLength;
-	if (b.byteLength !== index || a.byteOffset !== b.byteOffset) return false;
+	let index = a.length;
+	if (b.length !== index || a.byteOffset !== b.byteOffset) return false;
+	if (a instanceof Float64Array || a instanceof Float32Array || HAS_FLOAT_16_ARRAY && a instanceof Float16Array) {
+		while (index-- > 0) if (a[index] !== b[index] && (a[index] === a[index] || b[index] === b[index])) return false;
+		return true;
+	}
 	while (index-- > 0) if (a[index] !== b[index]) return false;
 	return true;
 }
@@ -217,7 +222,32 @@ function areTypedArraysEqual(a, b) {
 * Whether the URL instances are equal in value.
 */
 function areUrlsEqual(a, b) {
-	return a.hostname === b.hostname && a.pathname === b.pathname && a.protocol === b.protocol && a.port === b.port && a.hash === b.hash && a.username === b.username && a.password === b.password;
+	if (a.href === b.href) return true;
+	return a.protocol === b.protocol && a.username === b.username && a.password === b.password && a.host === b.host && a.pathname === b.pathname && a.hash === b.hash && areSearchParamsEqual(a.searchParams, b.searchParams);
+}
+/**
+* Whether the search params passed are equal in value.
+*
+* @note
+* Order is not significant, matching how the other unordered collections in the library are
+* compared. Repeated keys are, so this is a comparison of multisets rather than of sets:
+* `a=1&a=2` is equal to `a=2&a=1`, but not to `a=1&a=1`.
+*/
+function areSearchParamsEqual(a, b) {
+	const serializedA = a.toString();
+	const serializedB = b.toString();
+	return serializedA === serializedB || sortSearchParams(serializedA) === sortSearchParams(serializedB);
+}
+/**
+* Reorder a serialized query string so that params holding the same pairs compare as equal
+* regardless of the order they appear in.
+*
+* @note
+* The serializer percent-encodes `&` and `=` wherever they appear inside a name or a value, so
+* splitting on `&` recovers exactly the pairs and nothing else.
+*/
+function sortSearchParams(serialized) {
+	return serialized.split("&").sort().join("&");
 }
 function isPropertyEqual(a, b, state, property) {
 	if ((property === REACT_OWNER || property === PREACT_OWNER || property === PREACT_VNODE) && (a.$$typeof || b.$$typeof)) return true;
@@ -309,7 +339,7 @@ function createEqualityComparatorConfig({ circular, createCustomConfig, strict }
 		areArraysEqual: strict ? areObjectsEqualStrict : areArraysEqual,
 		areDataViewsEqual,
 		areDatesEqual,
-		areErrorsEqual,
+		areErrorsEqual: strict ? combineComparators(areErrorsEqual, areObjectsEqualStrict) : combineComparators(areErrorsEqual, areObjectsEqual),
 		areFunctionsEqual,
 		areMapsEqual: strict ? combineComparators(areMapsEqual, areObjectsEqualStrict) : areMapsEqual,
 		areNumbersEqual,
@@ -324,11 +354,13 @@ function createEqualityComparatorConfig({ circular, createCustomConfig, strict }
 	if (createCustomConfig) config = Object.assign({}, config, createCustomConfig(config));
 	if (circular) {
 		const areArraysEqual = createIsCircular(config.areArraysEqual);
+		const areErrorsEqual = createIsCircular(config.areErrorsEqual);
 		const areMapsEqual = createIsCircular(config.areMapsEqual);
 		const areObjectsEqual = createIsCircular(config.areObjectsEqual);
 		const areSetsEqual = createIsCircular(config.areSetsEqual);
 		config = Object.assign({}, config, {
 			areArraysEqual,
+			areErrorsEqual,
 			areMapsEqual,
 			areObjectsEqual,
 			areSetsEqual

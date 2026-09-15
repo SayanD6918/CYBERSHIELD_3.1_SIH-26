@@ -1,7 +1,3 @@
-# Cyber_Shield_3.0
-It's a Project that can check you document and passes
-
-
 # CYBERSHIELD 3.1 integration
 
 The repository now treats the React/TanStack application as the single operator UI and the Python PAD detector as a replaceable biometric service.

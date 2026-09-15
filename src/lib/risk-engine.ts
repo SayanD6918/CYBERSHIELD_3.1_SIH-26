@@ -67,16 +67,31 @@ export function calculateRisk(inputs: RiskInputs): RiskResult {
 
   if (inputs.watchlistHit) { score += 25; reasons.push("Watchlist match detected"); }
 
-  const criticalRisk =
-    inputs.watchlistHit ||
-    inputs.tamperStatus === "fail" ||
-    inputs.livenessStatus === "fail" ||
-    inputs.databaseStatus === "fail" ||
-    inputs.faceStatus === "fail";
+ const criticalRisk =
+   inputs.watchlistHit ||
+   inputs.tamperStatus === "fail" ||
+   inputs.livenessStatus === "fail" ||
+   inputs.databaseStatus === "fail" ||
+   inputs.faceStatus === "fail";
 
-  if (criticalRisk) score = Math.max(score, 70);
-  score = clamp(Math.round(score));
+ const unresolvedVerification =
+   inputs.tamperStatus === "review" ||
+   inputs.tamperStatus === "unknown" ||
+   inputs.databaseStatus === "review" ||
+   inputs.databaseStatus === "unavailable" ||
+   inputs.faceStatus === "review" ||
+   inputs.faceStatus === "unknown" ||
+   inputs.livenessStatus === "review" ||
+   inputs.livenessStatus === "unavailable";
 
-  const decision: Decision = score >= 70 ? "hold" : score >= 35 ? "manual" : "safe";
+ if (criticalRisk) {
+   score = Math.max(score, 70);
+ } else if (unresolvedVerification) {
+   score = Math.max(score, 35);
+ }
+
+ score = clamp(Math.round(score));
+
+ const decision: Decision = score >= 70 ? "hold" : score >= 35 ? "manual" : "safe";
   return { score, decision, reasons };
 }

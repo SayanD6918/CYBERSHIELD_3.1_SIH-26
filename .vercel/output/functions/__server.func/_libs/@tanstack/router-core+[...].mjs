@@ -1,4 +1,4 @@
-import { A as invariant, C as createInlineCssStyleAsset, L as rootRouteId, M as decodePath, N as dehydrateSsrMatchId, O as _getRenderedMatches, S as createInlineCssPlaceholderAsset, T as getStylesheetHref, b as GLOBAL_TSR, j as createLRUCache, x as TSR_SCRIPT_BARRIER_ID } from "./react-router+[...].mjs";
+import { A as invariant, C as createInlineCssStyleAsset, L as rootRouteId, M as decodePath, O as _getRenderedMatches, P as dehydrateSsrMatchId, S as createInlineCssPlaceholderAsset, T as getStylesheetHref, b as GLOBAL_TSR, j as createSieveCache, x as TSR_SCRIPT_BARRIER_ID } from "./react-router+[...].mjs";
 //#region node_modules/seroval/dist/index.js
 var SYM_ASYNC_ITERATOR = Symbol.asyncIterator;
 var SYM_HAS_INSTANCE = Symbol.hasInstance;
@@ -123,6 +123,8 @@ var NEG_ZERO_NODE = /* @__PURE__ */ createConstantNode(4);
 var INFINITY_NODE = /* @__PURE__ */ createConstantNode(5);
 var NEG_INFINITY_NODE = /* @__PURE__ */ createConstantNode(6);
 var NAN_NODE = /* @__PURE__ */ createConstantNode(7);
+var MIN_JSON_STRINGIFY_LENGTH = 64;
+var JSON_ESCAPE_DIFFERENCES = /[\x00-\x07\x0b\x0e-\x1f<\u2028\u2029\ud800-\udfff]/;
 function serializeChar(str) {
 	switch (str) {
 		case "\"": return "\\\"";
@@ -139,6 +141,7 @@ function serializeChar(str) {
 	}
 }
 function serializeString(str) {
+	if (str.length >= MIN_JSON_STRINGIFY_LENGTH && !JSON_ESCAPE_DIFFERENCES.test(str)) return JSON.stringify(str).slice(1, -1);
 	let result = "";
 	let lastPos = 0;
 	let replacement;
@@ -169,6 +172,7 @@ function deserializeReplacer(str) {
 	}
 }
 function deserializeString(str) {
+	if (typeof str === "string" && !str.includes("\\")) return str;
 	return str.replace(/(\\\\|\\"|\\n|\\r|\\b|\\t|\\f|\\u2028|\\u2029|\\x3C)/g, deserializeReplacer);
 }
 var { toString: objectToString } = Object.prototype;
@@ -461,7 +465,10 @@ var STREAM_CONSTRUCTOR = () => {
 	let count = 0;
 	const internal = {
 		flush(value, mode, x) {
-			for (x = 0; x < count; x++) if (listeners[x]) listeners[x][mode](value);
+			for (x = 0; x < count; x++) {
+				const listener = listeners[x];
+				if (listener) listener[mode](value);
+			}
 		},
 		up(listener, x, z, current) {
 			for (x = 0, z = buffer.length; x < z; x++) {
@@ -470,16 +477,20 @@ var STREAM_CONSTRUCTOR = () => {
 				else listener.next(current);
 			}
 		},
-		on(listener, temp) {
+		on(listener, temp = 0) {
+			let subscribed = alive;
 			if (alive) {
-				temp = count++;
+				for (temp = 0; temp < count; temp++) if (!listeners[temp]) break;
+				if (temp === count) count++;
 				listeners[temp] = listener;
 			}
 			internal.up(listener);
 			return () => {
-				if (alive) {
-					listeners[temp] = listeners[count];
-					listeners[count--] = void 0;
+				if (alive && subscribed) {
+					subscribed = false;
+					listeners[temp] = void 0;
+					while (count > 0 && !listeners[count - 1]) count--;
+					listeners.length = count;
 				}
 			};
 		}
@@ -684,19 +695,35 @@ function isStream(value) {
 function createStream() {
 	return STREAM_CONSTRUCTOR();
 }
-function createStreamFromAsyncIterable(iterable) {
+function createStreamFromAsyncIterable(iterable, cleanups) {
 	const stream = createStream();
 	const iterator = iterable[SYM_ASYNC_ITERATOR]();
+	let cancelled = false;
+	let done = false;
+	cleanups === null || cleanups === void 0 || cleanups.push(() => {
+		if (!(done || cancelled)) {
+			cancelled = true;
+			Promise.resolve().then(() => {
+				var _iterator$return;
+				return (_iterator$return = iterator.return) === null || _iterator$return === void 0 ? void 0 : _iterator$return.call(iterator);
+			}).catch(() => {});
+		}
+	});
 	async function push() {
 		try {
-			const value = await iterator.next();
-			if (value.done) stream.return(value.value);
-			else {
+			while (!cancelled) {
+				const value = await iterator.next();
+				if (cancelled) return;
+				if (value.done) {
+					done = true;
+					stream.return(value.value);
+					break;
+				}
 				stream.next(value.value);
-				await push();
 			}
 		} catch (error) {
-			stream.throw(error);
+			done = true;
+			if (!cancelled) stream.throw(error);
 		}
 	}
 	push().catch(() => {});
@@ -714,13 +741,15 @@ async function promiseToResult(current) {
 	}
 }
 function createBaseParserContext(mode, options) {
+	var _options$compactArray;
 	return {
 		plugins: options.plugins,
 		mode,
 		marked: /* @__PURE__ */ new Set(),
 		features: 127 ^ (options.disabledFeatures || 0),
 		refs: options.refs || /* @__PURE__ */ new Map(),
-		depthLimit: options.depthLimit || 1e3
+		depthLimit: options.depthLimit || 1e3,
+		compactArrayBufferViews: (_options$compactArray = options.compactArrayBufferViews) !== null && _options$compactArray !== void 0 ? _options$compactArray : false
 	};
 }
 /**
@@ -800,11 +829,22 @@ function createMapNode(ctx, id, k, v) {
 function createPromiseConstructorNode(ctx, id, resolver) {
 	return createSerovalNode(22, id, resolver, void 0, void 0, void 0, void 0, void 0, parseSpecialReference(ctx, 1), void 0, void 0, void 0);
 }
-function createArrayBufferNode(ctx, id, current) {
+function getArrayBufferView(ctx, current) {
+	if (!ctx.compactArrayBufferViews) return current;
+	const buffer = new Uint8Array(current.buffer, current.byteOffset, current.byteLength).slice().buffer;
+	const Constructor = current.constructor;
+	return new Constructor(buffer);
+}
+function encodeArrayBuffer(current) {
+	if (typeof Buffer !== "undefined") return Buffer.from(current).toString("base64");
 	const bytes = new Uint8Array(current);
+	if (typeof bytes.toBase64 === "function") return bytes.toBase64();
 	let result = "";
 	for (let i = 0, len = bytes.length; i < len; i++) result += String.fromCharCode(bytes[i]);
-	return createSerovalNode(19, id, serializeString(btoa(result)), void 0, void 0, void 0, void 0, void 0, parseSpecialReference(ctx, 5), void 0, void 0, void 0);
+	return btoa(result);
+}
+function createArrayBufferNode(ctx, id, current) {
+	return createSerovalNode(19, id, encodeArrayBuffer(current), void 0, void 0, void 0, void 0, void 0, parseSpecialReference(ctx, 5), void 0, void 0, void 0);
 }
 function createAsyncParserContext(mode, options) {
 	return {
@@ -866,12 +906,15 @@ async function parseBoxed$1(ctx, depth, id, current) {
 	return createBoxedNode(id, await parseAsync(ctx, depth, current.valueOf()));
 }
 async function parseTypedArray$1(ctx, depth, id, current) {
+	current = getArrayBufferView(ctx.base, current);
 	return createTypedArrayNode(id, current, await parseAsync(ctx, depth, current.buffer));
 }
 async function parseBigIntTypedArray$1(ctx, depth, id, current) {
+	current = getArrayBufferView(ctx.base, current);
 	return createBigIntTypedArrayNode(id, current, await parseAsync(ctx, depth, current.buffer));
 }
 async function parseDataView$1(ctx, depth, id, current) {
+	current = getArrayBufferView(ctx.base, current);
 	return createDataViewNode(id, current, await parseAsync(ctx, depth, current.buffer));
 }
 async function parseError$1(ctx, depth, id, current) {
@@ -1103,7 +1146,8 @@ function isValidSymbol(symbol) {
 		default: return false;
 	}
 }
-var MAX_BASE64_LENGTH = 1e6;
+var DEFAULT_MAX_BASE64_LENGTH = 1e6;
+var MIN_NATIVE_BASE64_LENGTH = 512;
 var MAX_BIGINT_LENGTH = 1e4;
 var MAX_REGEXP_SOURCE_LENGTH = 2e4;
 function applyObjectFlag(obj, flag) {
@@ -1116,7 +1160,9 @@ function applyObjectFlag(obj, flag) {
 }
 var DEFAULT_DEPTH_LIMIT = 1e3;
 function createBaseDeserializerContext(mode, options) {
-	var _options$features;
+	var _options$maxBase64Len, _options$features;
+	const maxBase64Length = (_options$maxBase64Len = options.maxBase64Length) !== null && _options$maxBase64Len !== void 0 ? _options$maxBase64Len : DEFAULT_MAX_BASE64_LENGTH;
+	if (!Number.isSafeInteger(maxBase64Length) || maxBase64Length < 0) throw new RangeError("maxBase64Length must be a non-negative safe integer");
 	const refs = options.refs || /* @__PURE__ */ new Map();
 	if (!("types" in refs)) Object.assign(refs, { types: /* @__PURE__ */ new Map() });
 	return {
@@ -1124,7 +1170,8 @@ function createBaseDeserializerContext(mode, options) {
 		plugins: options.plugins,
 		refs,
 		features: (_options$features = options.features) !== null && _options$features !== void 0 ? _options$features : 127 ^ (options.disabledFeatures || 0),
-		depthLimit: options.depthLimit || DEFAULT_DEPTH_LIMIT
+		depthLimit: options.depthLimit || DEFAULT_DEPTH_LIMIT,
+		maxBase64Length
 	};
 }
 function createVanillaDeserializerContext(options) {
@@ -1280,8 +1327,17 @@ function deserializeMap(ctx, depth, node) {
 	return result;
 }
 function deserializeArrayBuffer(ctx, node) {
-	if (node.s.length > MAX_BASE64_LENGTH) throw new SerovalMalformedNodeError(node);
-	return assignIndexedValue$1(ctx, node.i, ARRAY_BUFFER_CONSTRUCTOR(deserializeString(node.s)));
+	if (typeof node.s !== "string") throw new SerovalMalformedNodeError(node);
+	if (node.s.length > ctx.base.maxBase64Length) throw new RangeError("ArrayBuffer exceeds maxBase64Length (" + ctx.base.maxBase64Length + ")");
+	const source = deserializeString(node.s);
+	let buffer;
+	if (source.length < MIN_NATIVE_BASE64_LENGTH || typeof Buffer === "undefined") buffer = ARRAY_BUFFER_CONSTRUCTOR(source);
+	else {
+		const decoded = atob(source);
+		buffer = new ArrayBuffer(decoded.length);
+		Buffer.from(buffer).write(decoded, "latin1");
+	}
+	return assignIndexedValue$1(ctx, node.i, buffer);
 }
 function deserializeTypedArray(ctx, depth, node) {
 	var _node$b;
@@ -1289,7 +1345,7 @@ function deserializeTypedArray(ctx, depth, node) {
 	const source = deserialize$1(ctx, depth, node.f);
 	if (!(source instanceof ArrayBuffer)) throw new SerovalMalformedNodeError(node);
 	const offset = (_node$b = node.b) !== null && _node$b !== void 0 ? _node$b : 0;
-	if (offset < 0 || offset > source.byteLength || node.l > MAX_BASE64_LENGTH) throw new SerovalMalformedNodeError(node);
+	if (offset < 0 || offset > source.byteLength) throw new SerovalMalformedNodeError(node);
 	return assignIndexedValue$1(ctx, node.i, new construct(source, offset, node.l));
 }
 function deserializeDataView(ctx, depth, node) {
@@ -1297,7 +1353,7 @@ function deserializeDataView(ctx, depth, node) {
 	const source = deserialize$1(ctx, depth, node.f);
 	if (!(source instanceof ArrayBuffer)) throw new SerovalMalformedNodeError(node);
 	const offset = (_node$b2 = node.b) !== null && _node$b2 !== void 0 ? _node$b2 : 0;
-	if (offset < 0 || offset > source.byteLength || node.l > MAX_BASE64_LENGTH) throw new SerovalMalformedNodeError(node);
+	if (offset < 0 || offset > source.byteLength) throw new SerovalMalformedNodeError(node);
 	return assignIndexedValue$1(ctx, node.i, new DataView(source, offset, node.l));
 }
 function deserializeDictionary(ctx, depth, node, result) {
@@ -1357,13 +1413,15 @@ function deserializePromiseFulfill(ctx, depth, node) {
 function deserializeIteratorFactoryInstance(ctx, depth, node) {
 	deserialize$1(ctx, depth, node.a[0]);
 	const source = deserialize$1(ctx, depth, node.a[1]);
-	if (!source || typeof source !== "object" || !isSequence(source)) throw new SerovalMalformedNodeError(node.a[1]);
+	validateNodeType(ctx, node, node.a[1].i, 35);
+	if (!source) throw new SerovalMalformedNodeError(node.a[1]);
 	return sequenceToIterator(source);
 }
 function deserializeAsyncIteratorFactoryInstance(ctx, depth, node) {
 	deserialize$1(ctx, depth, node.a[0]);
 	const source = deserialize$1(ctx, depth, node.a[1]);
-	if (!source || typeof source !== "object" || !isStream(source)) throw new SerovalMalformedNodeError(node.a[1]);
+	validateNodeType(ctx, node, node.a[1].i, 31);
+	if (!source) throw new SerovalMalformedNodeError(node.a[1]);
 	return streamToAsyncIterable(source);
 }
 function deserializeStreamConstructor(ctx, depth, node) {
@@ -1409,6 +1467,7 @@ function deserializeAsyncIteratorFactory(ctx, depth, node) {
 }
 function deserializeSequence(ctx, depth, node) {
 	const result = assignIndexedValue$1(ctx, node.i, createSequence([], node.s, node.l));
+	assignNodeType(ctx, node.i, 35);
 	for (let i = 0, len = node.a.length; i < len; i++) result.v[i] = deserialize$1(ctx, depth, node.a[i]);
 	return result;
 }
@@ -2267,7 +2326,7 @@ function parseProperties(ctx, depth, properties) {
 	}
 	if (SYM_ASYNC_ITERATOR in properties) {
 		keyNodes.push(parseWellKnownSymbol(ctx.base, SYM_ASYNC_ITERATOR));
-		valueNodes.push(createAsyncIteratorFactoryInstanceNode(parseAsyncIteratorFactory(ctx.base), parseSOS(ctx, depth, ctx.type === 1 ? createStream() : createStreamFromAsyncIterable(properties))));
+		valueNodes.push(createAsyncIteratorFactoryInstanceNode(parseAsyncIteratorFactory(ctx.base), parseSOS(ctx, depth, ctx.type === 1 ? createStream() : createStreamFromAsyncIterable(properties, ctx.state.cleanups))));
 	}
 	if (SYM_TO_STRING_TAG in properties) {
 		keyNodes.push(parseWellKnownSymbol(ctx.base, SYM_TO_STRING_TAG));
@@ -2289,12 +2348,15 @@ function parseBoxed(ctx, depth, id, current) {
 	return createBoxedNode(id, parseSOS(ctx, depth, current.valueOf()));
 }
 function parseTypedArray(ctx, depth, id, current) {
+	current = getArrayBufferView(ctx.base, current);
 	return createTypedArrayNode(id, current, parseSOS(ctx, depth, current.buffer));
 }
 function parseBigIntTypedArray(ctx, depth, id, current) {
+	current = getArrayBufferView(ctx.base, current);
 	return createBigIntTypedArrayNode(id, current, parseSOS(ctx, depth, current.buffer));
 }
 function parseDataView(ctx, depth, id, current) {
+	current = getArrayBufferView(ctx.base, current);
 	return createDataViewNode(id, current, parseSOS(ctx, depth, current.buffer));
 }
 function parseError(ctx, depth, id, current) {
@@ -2534,8 +2596,10 @@ function destroyStreamParse(ctx) {
 	}
 }
 async function toCrossJSONAsync(source, options = {}) {
+	const plugins = resolvePlugins(options.plugins);
 	return await parseTopAsync(createAsyncParserContext(2, {
-		plugins: resolvePlugins(options.plugins),
+		compactArrayBufferViews: options.compactArrayBufferViews,
+		plugins,
 		disabledFeatures: options.disabledFeatures,
 		refs: options.refs
 	}), source);
@@ -2543,6 +2607,7 @@ async function toCrossJSONAsync(source, options = {}) {
 function crossSerializeStream(source, options) {
 	const plugins = resolvePlugins(options.plugins);
 	const ctx = createStreamParserContext({
+		compactArrayBufferViews: options.compactArrayBufferViews,
 		plugins,
 		refs: options.refs,
 		disabledFeatures: options.disabledFeatures,
@@ -2569,8 +2634,10 @@ function crossSerializeStream(source, options) {
 	return destroyStreamParse.bind(null, ctx);
 }
 function toCrossJSONStream(source, options) {
+	const plugins = resolvePlugins(options.plugins);
 	const ctx = createStreamParserContext({
-		plugins: resolvePlugins(options.plugins),
+		compactArrayBufferViews: options.compactArrayBufferViews,
+		plugins,
 		refs: options.refs,
 		disabledFeatures: options.disabledFeatures,
 		depthLimit: options.depthLimit,
@@ -2587,6 +2654,7 @@ function fromJSON(source, options = {}) {
 	const disabledFeatures = options.disabledFeatures || 0;
 	const sourceFeatures = (_source$f = source.f) !== null && _source$f !== void 0 ? _source$f : 127;
 	return deserializeTop(createVanillaDeserializerContext({
+		maxBase64Length: options.maxBase64Length,
 		plugins,
 		markedRefs: source.m,
 		features: sourceFeatures & ~disabledFeatures,
@@ -2939,7 +3007,7 @@ var ShallowErrorPlugin = /* @__PURE__ */ createPlugin({
 	}
 });
 //#endregion
-//#region node_modules/seroval-plugins/dist/web-43VA2W_p.js
+//#region node_modules/seroval-plugins/dist/web-CWqRG00W.js
 var READABLE_STREAM_FACTORY = {};
 var READABLE_STREAM_FACTORY_CONSTRUCTOR = (stream) => new ReadableStream({ start(controller) {
 	stream.on({
@@ -2983,15 +3051,17 @@ var ReadableStreamFactoryPlugin = /* @__PURE__ */ createPlugin({
 });
 async function drainStream(stream, reader) {
 	try {
-		const result = await reader.read();
-		if (result.done) {
-			stream.return(result.value);
-			reader.releaseLock();
-		} else {
+		while (true) {
+			const result = await reader.read();
+			if (result.done) {
+				stream.return(result.value);
+				reader.releaseLock();
+				break;
+			}
 			stream.next(result.value);
-			await drainStream(stream, reader);
 		}
 	} catch (error) {
+		reader.releaseLock();
 		stream.throw(error);
 	}
 }
@@ -3044,7 +3114,9 @@ var defaultSerovalPlugins = [
 			return "(" + ctx.serialize(node.factory) + ")(" + ctx.serialize(node.stream) + ")";
 		},
 		deserialize(node, ctx) {
-			return READABLE_STREAM_FACTORY_CONSTRUCTOR(ctx.deserialize(node.stream));
+			const stream = ctx.deserialize(node.stream);
+			if (!stream || typeof stream !== "object" || !isStream(stream)) throw new Error("Expected a stream source.");
+			return READABLE_STREAM_FACTORY_CONSTRUCTOR(stream);
 		}
 	})
 ];
@@ -3151,7 +3223,7 @@ var manifestCaches = /* @__PURE__ */ new WeakMap();
 function getManifestCache(manifest) {
 	const cache = manifestCaches.get(manifest);
 	if (cache) return cache;
-	const newCache = createLRUCache(MANIFEST_CACHE_SIZE);
+	const newCache = createSieveCache(MANIFEST_CACHE_SIZE);
 	manifestCaches.set(manifest, newCache);
 	return newCache;
 }
@@ -3521,7 +3593,8 @@ function getOrigin(request) {
 function getNormalizedURL(url, base) {
 	if (typeof url === "string") url = url.replace("\\", "%5C");
 	const rawUrl = new URL(url, base);
-	const { path: decodedPathname, handledProtocolRelativeURL } = decodePath(rawUrl.pathname);
+	const handledProtocolRelativeURL = rawUrl.pathname.startsWith("//");
+	const decodedPathname = decodePath(handledProtocolRelativeURL ? rawUrl.pathname.replace(/^\/+/, "/") : rawUrl.pathname);
 	const searchParams = new URLSearchParams(rawUrl.search);
 	const normalizedHref = decodedPathname + (searchParams.size > 0 ? "?" : "") + searchParams.toString() + rawUrl.hash;
 	return {

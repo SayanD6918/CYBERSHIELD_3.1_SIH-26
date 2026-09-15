@@ -10,10 +10,30 @@ export function finalizeVerification(
 
   const risk = calculateRisk({
     ocrConfidence: Number(record.checks.find((c) => c.id === "ocr")?.detail.match(/\d+/)?.[0] ?? 0),
-    expiryStatus: record.checks.find((c) => c.id === "expiry")?.status === "passed" ? "valid" : record.expiryDate ? "unknown" : "unknown",
-    tamperStatus: record.checks.find((c) => c.id === "tamper")?.status === "fail" ? "fail" : record.checks.find((c) => c.id === "tamper")?.status === "review" ? "review" : "passed",
-    faceStatus: biometric.faceMatchStatus === "NO_MATCH" ? "fail" : biometric.faceMatchStatus === "UNCERTAIN" || biometric.faceMatchStatus === "UNAVAILABLE" ? "review" : "passed",
-    livenessStatus: biometric.livenessStatus === "SPOOF" ? "fail" : biometric.livenessStatus === "UNCERTAIN" || biometric.livenessStatus === "UNAVAILABLE" ? "unavailable" : "passed",
+    expiryStatus:
+      record.checks.find((c) => c.id === "expiry")?.status === "passed"
+        ? "valid"
+        : record.checks.find((c) => c.id === "expiry")?.status === "fail"
+          ? "expired"
+          : "unknown",
+    tamperStatus:
+      record.checks.find((c) => c.id === "tamper")?.status === "fail"
+        ? "fail"
+        : record.checks.find((c) => c.id === "tamper")?.status === "review"
+          ? "review"
+          : "passed",
+    faceStatus:
+      biometric.faceMatchStatus === "NO_MATCH"
+        ? "fail"
+        : biometric.faceMatchStatus === "UNCERTAIN" || biometric.faceMatchStatus === "UNAVAILABLE"
+          ? "review"
+          : "passed",
+    livenessStatus:
+      biometric.livenessStatus === "SPOOF"
+        ? "fail"
+        : biometric.livenessStatus === "UNCERTAIN" || biometric.livenessStatus === "UNAVAILABLE"
+          ? "unavailable"
+          : "passed",
     databaseStatus: databaseVerification.status,
     documentTypeKnown: record.documentType !== "unknown",
     documentNumberPresent: record.documentNumber !== "UNKNOWN",

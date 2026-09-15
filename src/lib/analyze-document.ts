@@ -49,110 +49,368 @@ function parseModelJson(text: string): ModelResult {
   return JSON.parse(stripped) as ModelResult;
 }
 
-function fallbackFromImage(imageDataUrl: string): ModelResult {
-  const commaIndex = imageDataUrl.indexOf(",");
-  const base64 = commaIndex >= 0 ? imageDataUrl.slice(commaIndex + 1) : imageDataUrl;
+async function analyzeWithLocalOcr(imageDataUrl: string): Promise<ModelResult> {
+  const { execFile } = await import("node:child_process");
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const { promisify } = await import("node:util");
 
-  // Create several independent deterministic signals from different
-  // regions of the uploaded image data.
-  const length = base64.length;
+  const execFileAsync = promisify(execFile);
 
-  const samplePositions = [
-    0,
-    Math.floor(length * 0.2),
-    Math.floor(length * 0.4),
-    Math.floor(length * 0.6),
-    Math.floor(length * 0.8),
-  ];
+  const tesseractCmd =
+    process.env.TESSERACT_CMD || "C:\\Program Files\\Tesseract-OCR\\tesseract.exe";
 
-  function hashSample(start: number, size: number): number {
-    const sample = base64.slice(start, start + size);
+  const match = imageDataUrl.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,(.+)$/s);
 
-    let hash = 2166136261;
-
-    for (let i = 0; i < sample.length; i += 1) {
-      hash ^= sample.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-
-    return hash >>> 0;
+  if (!match) {
+    throw new Error("Invalid image data URL.");
   }
 
-  const signals = samplePositions.map((position) => hashSample(position, 6000));
+  const mimeSubtype = match[1].toLowerCase();
+  const base64Data = match[2];
 
-  const [signalA, signalB, signalC, signalD, signalE] = signals;
+  const extension = mimeSubtype === "png" ? ".png" : mimeSubtype === "webp" ? ".webp" : ".jpg";
 
-  // Image-size signal.
-  const sizeSignal = length % 1000;
+  const tempDirectory = await mkdtemp(path.join(tmpdir(), "cybershield-ocr-"));
 
-  // OCR confidence.
-  // Larger and more varied images can produce different simulated
-  // extraction confidence while remaining deterministic.
-  const ocrConfidence = 55 + ((signalA ^ signalC ^ sizeSignal) % 46);
+  const imagePath = path.join(tempDirectory, `document${extension}`);
 
-  // Expiry status.
-  const expiryOptions = ["valid", "valid", "valid", "unknown", "expired"] as const;
+  try {
+    await writeFile(imagePath, Buffer.from(base64Data, "base64"));
 
-  const expiryStatus = expiryOptions[(signalB ^ signalE) % expiryOptions.length];
+    /*
+     * First pass: normal OCR text.
+     */
+    const textResult = await execFileAsync(tesseractCmd, [imagePath, "stdout", "--psm", "6"], {
+      windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024,
+    });
 
-  // Tamper status.
-  const tamperOptions = ["passed", "passed", "review", "review", "fail"] as const;
+    const text = String(textResult.stdout ?? "").trim();
 
-  const tamperStatus = tamperOptions[(signalA ^ signalD) % tamperOptions.length];
+    /*
+     * Second pass: TSV gives us real word-level OCR confidence.
+     */
+    let ocrConfidence = 0;
 
-  // Simulated document classification.
-  const documentTypes = ["passport", "visa", "permit"] as const;
+    try {
+      const tsvResult = await execFileAsync(
+        tesseractCmd,
+        [imagePath, "stdout", "--psm", "6", "tsv"],
+        {
+          windowsHide: true,
+          maxBuffer: 4 * 1024 * 1024,
+        },
+      );
 
-  const documentType = documentTypes[(signalB ^ signalC) % documentTypes.length];
+      const tsvLines = String(tsvResult.stdout ?? "").split(/\r?\n/);
+      const confidences: number[] = [];
 
-  // Generate a stable simulated document number.
-  const documentNumberValue = (signalA ^ signalB ^ signalD) % 900000;
+      for (const line of tsvLines.slice(1)) {
+        const columns = line.split("\t");
 
-  // Simulated face comparison estimate.
-  const faceScore = 50 + ((signalC ^ signalE) % 46);
+        if (columns.length < 12) continue;
 
-  return {
-    documentType,
+        const recognizedText = String(columns[11] ?? "").trim();
+        const confidence = Number(columns[10]);
 
-    documentNumber: `SIM-${String(100000 + documentNumberValue)}`,
+        if (!recognizedText) continue;
+        if (!Number.isFinite(confidence) || confidence < 0) continue;
 
-    holderName: null,
-    nationality: null,
-    dateOfBirth: null,
+        // Ignore extremely weak/noisy OCR tokens.
+        if (confidence < 25) continue;
 
-    expiryDate:
-      expiryStatus === "expired" ? "2024-01-01" : expiryStatus === "valid" ? "2028-06-01" : null,
+        confidences.push(confidence);
+      }
 
-    expiryStatus,
+      if (confidences.length > 0) {
+        confidences.sort((a, b) => a - b);
 
-    ocrConfidence,
+        const middle = Math.floor(confidences.length / 2);
 
-    tamperAnalysis: {
-      status: tamperStatus,
-      notes:
-        tamperStatus === "fail"
-          ? "Training simulation detected significant visual anomalies."
-          : tamperStatus === "review"
-            ? "Training simulation detected features requiring manual review."
-            : "Training simulation detected no significant visual anomalies.",
-    },
+        const medianConfidence =
+          confidences.length % 2 === 0
+            ? (confidences[middle - 1] + confidences[middle]) / 2
+            : confidences[middle];
 
-    faceMatch: {
-      status: "review",
-      score: faceScore,
-      notes: "Estimated from image-derived simulation signals; not a biometric verification.",
-    },
+        ocrConfidence = Math.round(medianConfidence);
+      }
+    } catch {
+      /*
+       * OCR text is still usable even if the confidence pass fails.
+       */
+      ocrConfidence = 0;
+    }
 
-    liveness: {
-      status: "unavailable",
-      notes: "Liveness cannot be verified from a still image.",
-    },
 
-    rationale:
-      "AI service unavailable. Training-mode analysis uses multiple deterministic image-derived simulation signals.",
+    const normalizedText = text.replace(/[|]/g, "I").replace(/\r/g, "").trim();
 
-    flags: ["Simulated result", "AI service unavailable"],
-  };
+    const lines = normalizedText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    /*
+     * Detect document type.
+     */
+    let documentType = "unknown";
+
+    if (/\bpassport\b/i.test(normalizedText)) {
+      documentType = "passport";
+    } else if (/\bvisa\b/i.test(normalizedText)) {
+      documentType = "visa";
+    } else if (/\bpermit\b/i.test(normalizedText)) {
+      documentType = "permit";
+    } else if (lines.some((line) => /^P<[A-Z<]{3}/i.test(line.replace(/\s+/g, "")))) {
+      documentType = "passport";
+    }
+
+    /*
+     * Helper for labeled fields.
+     */
+    function fieldValue(pattern: RegExp): string | null {
+      for (const line of lines) {
+        const found = line.match(pattern);
+
+        if (found?.[1]) {
+          return found[1].replace(/<+/g, " ").replace(/\s+/g, " ").trim();
+        }
+      }
+
+      return null;
+    }
+
+    /*
+     * Parse dates such as:
+     * 12 APR 1991
+     * 18 AUG 2029
+     */
+    function parseHumanDate(value: string | null): string | null {
+      if (!value) return null;
+
+      const match = value.match(
+        /^(\d{1,2})\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{4})$/i,
+      );
+
+      if (!match) return null;
+
+      const months: Record<string, string> = {
+        JAN: "01",
+        FEB: "02",
+        MAR: "03",
+        APR: "04",
+        MAY: "05",
+        JUN: "06",
+        JUL: "07",
+        AUG: "08",
+        SEP: "09",
+        OCT: "10",
+        NOV: "11",
+        DEC: "12",
+      };
+
+      const month = months[match[2].slice(0, 3).toUpperCase()];
+
+      if (!month) return null;
+
+      return `${match[3]}-${month}-${match[1].padStart(2, "0")}`;
+    }
+
+    /*
+     * Find passport MRZ lines.
+     */
+    const mrzLines = lines
+      .map((line) => line.replace(/\s+/g, "").toUpperCase())
+      .filter((line) => /^[A-Z0-9<]{25,44}$/.test(line));
+
+    let documentNumber: string | null = null;
+    let holderName: string | null = null;
+    let nationality: string | null = null;
+    let dateOfBirth: string | null = null;
+    let expiryDate: string | null = null;
+
+    /*
+     * Prefer clearly labeled fields.
+     */
+    documentNumber = fieldValue(/(?:No\.?|Number|Document\s*No\.?)\s*[:#]?\s*([A-Z0-9<\-]+)/i);
+
+    const surname = fieldValue(/Surname\s*[:#]?\s*(.+)$/i);
+
+    const givenNames = fieldValue(/Given\s+names?\s*[:#]?\s*(.+)$/i);
+
+    if (surname || givenNames) {
+      holderName = [surname, givenNames]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/<+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    nationality = fieldValue(/Nationality\s*[:#]?\s*(.+)$/i);
+
+    dateOfBirth = parseHumanDate(fieldValue(/Date\s+of\s+birth\s*[:#]?\s*(.+)$/i));
+
+    expiryDate = parseHumanDate(fieldValue(/Date\s+of\s+expiry\s*[:#]?\s*(.+)$/i));
+
+    /*
+     * Passport MRZ fallback.
+     *
+     * TD3 passport format:
+     * Line 1 = P<CCC...
+     * Line 2 = document number + nationality + DOB + sex + expiry...
+     */
+    if (mrzLines.length >= 2) {
+      const mrz1 = mrzLines[mrzLines.length - 2];
+      const mrz2 = mrzLines[mrzLines.length - 1];
+
+      if (/^P</.test(mrz1) && mrz2.length >= 27) {
+        documentType = "passport";
+
+        if (!documentNumber) {
+          const rawNumber = mrz2.slice(0, 9);
+
+          documentNumber = rawNumber.replace(/<+$/, "").trim() || null;
+        }
+
+        if (!nationality) {
+          nationality = mrz2.slice(10, 13).replace(/</g, "").trim() || null;
+        }
+
+        if (!dateOfBirth) {
+          const rawDob = mrz2.slice(13, 19);
+
+          if (/^\d{6}$/.test(rawDob)) {
+            const yy = Number(rawDob.slice(0, 2));
+            const mm = rawDob.slice(2, 4);
+            const dd = rawDob.slice(4, 6);
+
+            const year = yy >= 50 ? 1900 + yy : 2000 + yy;
+
+            dateOfBirth = `${year}-${mm}-${dd}`;
+          }
+        }
+
+        if (!expiryDate) {
+          const rawExpiry = mrz2.slice(21, 27);
+
+          if (/^\d{6}$/.test(rawExpiry)) {
+            const yy = Number(rawExpiry.slice(0, 2));
+            const mm = rawExpiry.slice(2, 4);
+            const dd = rawExpiry.slice(4, 6);
+
+            const year = yy >= 50 ? 1900 + yy : 2000 + yy;
+
+            expiryDate = `${year}-${mm}-${dd}`;
+          }
+        }
+
+        if (!holderName) {
+          const nameField = mrz1.slice(5);
+
+          const nameParts = nameField.split("<<");
+
+          const surnamePart = nameParts[0]?.replace(/<+/g, " ").trim() || "";
+
+          const givenPart =
+            nameParts.slice(1).join(" ").replace(/<+/g, " ").replace(/\s+/g, " ").trim() || "";
+
+          holderName = [surnamePart, givenPart].filter(Boolean).join(" ").trim() || null;
+        }
+      }
+    }
+
+    /*
+     * Determine expiry status from the extracted date.
+     */
+    let expiryStatus = "unknown";
+
+    if (expiryDate) {
+      const expiry = new Date(`${expiryDate}T23:59:59`);
+      const now = new Date();
+
+      if (!Number.isNaN(expiry.getTime())) {
+        expiryStatus = expiry >= now ? "valid" : "expired";
+      }
+    }
+
+    /*
+     * OCR itself does NOT prove that a document has not been tampered with.
+     * Therefore we deliberately report review instead of inventing a
+     * successful tamper result.
+     */
+    const extractedFieldCount = [
+      documentNumber,
+      holderName,
+      nationality,
+      dateOfBirth,
+      expiryDate,
+    ].filter(Boolean).length;
+
+    if (ocrConfidence === 0) {
+      ocrConfidence = Math.min(95, 45 + extractedFieldCount * 10);
+    }
+
+    const flags: string[] = ["Local Tesseract OCR"];
+
+    if (mrzLines.length >= 2) {
+      flags.push("Passport MRZ detected");
+    }
+
+    if (extractedFieldCount === 0) {
+      flags.push("No structured identity fields confidently extracted");
+    }
+
+    flags.push("Visual tamper analysis requires review");
+
+    return {
+      documentType,
+
+      documentNumber,
+
+      holderName,
+
+      nationality,
+
+      dateOfBirth,
+
+      expiryDate,
+
+      expiryStatus,
+
+      ocrConfidence,
+
+      tamperAnalysis: {
+        status: "review",
+        notes:
+          "Local OCR extracted document text successfully, but OCR alone cannot establish whether the document image has been visually tampered with.",
+      },
+
+      faceMatch: {
+        status: "review",
+        score: null,
+        notes: "Face matching is deferred until the person-camera stage.",
+      },
+
+      liveness: {
+        status: "unavailable",
+        notes: "Liveness is evaluated during the live camera stage.",
+      },
+
+      rationale:
+        extractedFieldCount > 0
+          ? "Document information was extracted using local Tesseract OCR. Biometric and visual tamper checks remain separate verification stages."
+          : "Tesseract OCR completed, but structured identity fields could not be confidently extracted from the document.",
+
+      flags,
+    };
+  } finally {
+    await rm(tempDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
 }
 
 function watchlistMatch(name: string | null | undefined, list: string[]): string | null {
@@ -337,12 +595,15 @@ export const analyzeDocument = createServerFn({ method: "POST" })
   .validator((input: unknown) => InputSchema.parse(input))
   .handler(async ({ data }) => {
     const apiKey = process.env.XAI_API_KEY;
+
     if (!apiKey) {
+      const localOcrResult = await analyzeWithLocalOcr(data.imageDataUrl);
+
       return {
         ok: true as const,
-        simulated: true,
+        simulated: false,
         record: buildRecord(
-          fallbackFromImage(data.imageDataUrl),
+          localOcrResult,
           data.fileName,
           data.watchlistNames,
           data.autoHoldWatchlist,
@@ -350,7 +611,7 @@ export const analyzeDocument = createServerFn({ method: "POST" })
       };
     }
 
-    const prompt = `You are a document-forensics assistant inside a BORDER CONTROL TRAINING SIMULATOR called BorderShield.
+    const prompt = `You are a document-forensics assistant inside CYBERSHIELD 3.1.
 Analyze the uploaded image. This output is NEVER used for a real identity decision.
 
 Do not calculate a final risk score.
