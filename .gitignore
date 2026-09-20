@@ -3,3 +3,13 @@ node_modules/
 .github_repo
 .env
 .env.*
+# External biometric model weights
+biometric_service/models/*.onnx
+
+# Generated/cache artifacts
+__pycache__/
+.pytest_cache/
+*.pyc
+.node_modules.lock
+# Passive PAD model is an external deployment/training artifact
+biometric_service/models/*.pkl

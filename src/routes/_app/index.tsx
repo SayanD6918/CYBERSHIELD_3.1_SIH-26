@@ -24,18 +24,24 @@ function OverviewPage() {
   const cases = useAppStore((s) => s.cases);
   const stats = useMemo(() => computeStats(cases), [cases]);
   const [selected, setSelected] = useState<CaseRecord | null>(null);
-  const chart = useMemo(
-    () => [
-      { day: "Sat", n: 162 },
-      { day: "Sun", n: 148 },
-      { day: "Mon", n: 201 },
-      { day: "Tue", n: 188 },
-      { day: "Wed", n: 214 },
-      { day: "Thu", n: 196 },
-      { day: "Fri", n: 175 + Math.min(12, cases.length) },
-    ],
-    [cases.length],
-  );
+  // Real throughput only. An earlier build drew an invented week of
+  // 150-200 scans a day whenever demo mode was on.
+  const chart = useMemo(() => {
+    const days = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date();
+      date.setHours(0, 0, 0, 0);
+      date.setDate(date.getDate() - (6 - index));
+      return date;
+    });
+
+    return days.map((date) => ({
+      day: date.toLocaleDateString(undefined, { weekday: "short" }),
+      n: cases.filter((item) => {
+        const created = new Date(item.createdAt);
+        return created >= date && created < new Date(date.getTime() + 24 * 60 * 60 * 1000);
+      }).length,
+    }));
+  }, [cases]);
 
   const pct = (n: number) =>
     stats.total === 0 ? "0.0%" : `${((n / stats.total) * 100).toFixed(1)}%`;
@@ -90,7 +96,7 @@ function OverviewPage() {
         <Card className="lg:col-span-3">
           <CardHeader>
             <CardTitle>Throughput this week</CardTitle>
-            <CardDescription>Completed scans by day at this checkpoint.</CardDescription>
+            <CardDescription>Cases completed on this workstation over the last seven days.</CardDescription>
           </CardHeader>
           <CardContent className="h-56">
             <ResponsiveContainer width="100%" height="100%">
@@ -101,7 +107,7 @@ function OverviewPage() {
                   tickLine={false}
                   tick={{ fill: "var(--color-muted-foreground)", fontSize: 12 }}
                 />
-                <YAxis hide domain={[0, 260]} />
+                <YAxis hide allowDecimals={false} />
                 <RechartsTooltip
                   cursor={{ fill: "color-mix(in oklab, var(--color-primary) 12%, transparent)" }}
                   contentStyle={{

@@ -16,10 +16,10 @@ import { ScanChecks } from "@/components/scan-checks";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { analyzeDocument } from "@/lib/analyze-document";
-import { prepareDocumentImage } from "@/lib/document-image";
+import { prepareDocumentImage, type DocumentImageQuality } from "@/lib/document-image";
 import { finalizeVerification } from "@/lib/finalize-verification";
 import { useAppStore } from "@/lib/store";
-import type { BiometricResult, CaseRecord } from "@/lib/types";
+import type { BiometricResult, CaseRecord, FaceEvidence } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_app/verify")({
@@ -28,11 +28,47 @@ export const Route = createFileRoute("/_app/verify")({
 
 const BIOMETRIC_URL = import.meta.env.VITE_BIOMETRIC_URL ?? "http://127.0.0.1:8765";
 
-const CHALLENGES = [
-  "Turn your head to the left",
-  "Turn your head to the right",
-  "Look straight at the camera",
-];
+/**
+ * The challenge sequence from the operating manual, performed in order.
+ *
+ * Three scripted movements are materially harder to replay than one, and
+ * ending on LOOK_STRAIGHT means the burst always finishes with frontal
+ * frames - which is what the face matcher wants.
+ */
+const CHALLENGE_SEQUENCE = [
+  {
+    action: "TURN_LEFT",
+    label: "Turn your head to the left",
+    hint: "Start facing the camera, turn left, and hold it.",
+  },
+  {
+    action: "TURN_RIGHT",
+    label: "Turn your head to the right",
+    hint: "Come back through centre, turn right, and hold it.",
+  },
+  {
+    action: "LOOK_STRAIGHT",
+    label: "Look straight at the camera",
+    hint: "Return to a straight, centred pose and hold it.",
+  },
+] as const;
+
+type ChallengeStep = (typeof CHALLENGE_SEQUENCE)[number];
+
+type ChallengeStepResult = {
+  action: string;
+  label: string;
+  status: "PASSED" | "FAILED";
+  failureReason: string | null;
+  confidence: number | null;
+  initialPose: { yaw: number; pitch: number; roll: number } | null;
+  observedPose: { yaw: number; pitch: number; roll: number } | null;
+  movementDetected: boolean;
+  validPoseFrames: number;
+};
+
+const FRAMES_PER_STEP = 16;
+const FRAME_INTERVAL_MS = 130;
 
 function newCaseId() {
   const serial = String(Date.now()).slice(-6);
@@ -62,8 +98,11 @@ function VerifyPage() {
   const [cameraOpen, setCameraOpen] = useState(false);
   const [biometricBusy, setBiometricBusy] = useState(false);
   const [bioResult, setBioResult] = useState<BiometricResult | null>(null);
+  const [documentQuality, setDocumentQuality] = useState<DocumentImageQuality | null>(null);
 
-  const [challenge] = useState(() => CHALLENGES[Math.floor(Math.random() * CHALLENGES.length)]);
+  const [challengeState, setChallengeState] = useState<"READY" | "CAPTURING" | "PASSED" | "FAILED">("READY");
+  const [activeStep, setActiveStep] = useState<ChallengeStep | null>(null);
+  const [stepResults, setStepResults] = useState<ChallengeStepResult[]>([]);
 
   const displayed = latest ?? cases[0] ?? null;
 
@@ -103,6 +142,7 @@ function VerifyPage() {
       setFileName(prepared.fileName);
       setPreview(prepared.previewUrl);
       setPayload(prepared.dataUrl);
+      setDocumentQuality(prepared.quality);
       setPending(null);
       setBioResult(null);
       setLatest(null);
@@ -132,6 +172,7 @@ function VerifyPage() {
           fileName,
           watchlistNames: watchlist.map((item) => item.name),
           autoHoldWatchlist: autoHold,
+          imageQuality: documentQuality,
         },
       });
 
@@ -183,6 +224,7 @@ function VerifyPage() {
       streamRef.current = stream;
       setCameraOpen(true);
       setBioResult(null);
+      setChallengeState("READY");
 
       toast.success("Camera connected.");
     } catch (error) {
@@ -217,6 +259,17 @@ function VerifyPage() {
     setCameraOpen(false);
   }
 
+  async function captureBurst(frameCount = 8, intervalMs = 120) {
+    const frames: string[] = [];
+    for (let i = 0; i < frameCount; i += 1) {
+      frames.push(captureFrame());
+      if (i < frameCount - 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+      }
+    }
+    return frames;
+  }
+
   function captureFrame() {
     const video = videoRef.current;
 
@@ -248,183 +301,219 @@ function VerifyPage() {
     return canvas.toDataURL("image/jpeg", 0.82);
   }
 
+  async function postJson(path: string, body: unknown) {
+    const response = await fetch(`${BIOMETRIC_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      throw new Error(`Biometric service returned ${response.status} for ${path}.`);
+    }
+    return response.json();
+  }
+
+  /**
+   * Walk the challenge sequence, then score liveness and the face match.
+   *
+   * Every step's frames are kept: passive PAD sees the whole session, and
+   * the face matcher receives the burst rather than a single still, so the
+   * service can pick the most frontal frame itself.
+   */
+  async function runChallengeSequence() {
+    const results: ChallengeStepResult[] = [];
+    const allFrames: string[] = [];
+    const frontalFrames: string[] = [];
+
+    for (const step of CHALLENGE_SEQUENCE) {
+      setActiveStep(step);
+      const frames = await captureBurst(FRAMES_PER_STEP, FRAME_INTERVAL_MS);
+      allFrames.push(...frames);
+
+      if (step.action === "LOOK_STRAIGHT") {
+        frontalFrames.push(...frames);
+      }
+
+      const active = await postJson("/api/active-challenge", {
+        challenge: step.action,
+        frames_data_urls: frames,
+      });
+
+      const result: ChallengeStepResult = {
+        action: step.action,
+        label: step.label,
+        status: active.challenge_status === "PASSED" ? "PASSED" : "FAILED",
+        failureReason: active.failure_reason ?? null,
+        confidence: typeof active.confidence === "number" ? active.confidence : null,
+        initialPose: active.initial_pose ?? null,
+        observedPose: active.observed_pose ?? null,
+        movementDetected: active.movement_detected === true,
+        validPoseFrames: active.evidence?.valid_pose_frames ?? 0,
+      };
+
+      results.push(result);
+      setStepResults([...results]);
+    }
+
+    setActiveStep(null);
+    return { results, allFrames, frontalFrames };
+  }
+
   async function runBiometric() {
     if (!pending || !payload || !caseId) {
       return;
     }
 
     setBiometricBusy(true);
+    setChallengeState("CAPTURING");
+    setStepResults([]);
 
     try {
-      const liveFrame = captureFrame();
+      const { results, allFrames, frontalFrames } = await runChallengeSequence();
 
-      const liveResponse = await fetch(`${BIOMETRIC_URL}/api/liveness`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          image_data_url: liveFrame,
-        }),
+      const sequencePassed = results.every((step) => step.status === "PASSED");
+      const firstFailure = results.find((step) => step.status === "FAILED");
+      setChallengeState(sequencePassed ? "PASSED" : "FAILED");
+
+      const live = await postJson("/api/liveness", { frames_data_urls: allFrames });
+
+      // Prefer the frames captured while the subject was asked to face the
+      // camera; fall back to the whole burst if that step produced none.
+      const match = await postJson("/api/face-match", {
+        document_image_data_url: payload,
+        live_frames_data_urls: frontalFrames.length > 0 ? frontalFrames : allFrames,
       });
 
-      if (!liveResponse.ok) {
-        throw new Error("Liveness service unavailable.");
-      }
+      const faceSimilarity =
+        typeof match.similarity_score === "number" ? match.similarity_score : null;
+      const faceThreshold = typeof match.threshold === "number" ? match.threshold : null;
 
-      const live = await liveResponse.json();
-
-      const matchResponse = await fetch(`${BIOMETRIC_URL}/api/face-match`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const faceEvidence: FaceEvidence = {
+        status:
+          match.face_match_status === "MATCH"
+            ? "passed"
+            : match.face_match_status === "NO_MATCH"
+              ? "fail"
+              : "review",
+        // Cosine similarity is not a confidence, and pretending otherwise
+        // is exactly the misreading this field invites.
+        confidence: null,
+        method: match.matcher ?? "sface-embedding",
+        issues: Array.isArray(match.issues) ? match.issues : [],
+        similarity: faceSimilarity,
+        distance: typeof match.distance === "number" ? match.distance : null,
+        threshold: faceThreshold,
+        uncertainBand: typeof match.uncertain_band === "number" ? match.uncertain_band : null,
+        metric: match.metric ?? "cosine_similarity",
+        model: match.model ?? null,
+        modelVersion: match.model_version ?? null,
+        calibrated: match.calibrated === true,
+        source: "comparison" as const,
+        measurements: {
+          documentPortrait: match.document_portrait ? JSON.stringify(match.document_portrait) : null,
+          documentFace: match.document_face ? JSON.stringify(match.document_face) : null,
+          liveFace: match.live_face ? JSON.stringify(match.live_face) : null,
+          probeFrame: match.probe_frame ? JSON.stringify(match.probe_frame) : null,
+          documentEmbeddingGenerated: Boolean(match.document_face),
+          liveEmbeddingGenerated: Boolean(match.live_face),
         },
-        body: JSON.stringify({
-          document_image_data_url: payload,
-          live_image_data_url: liveFrame,
-        }),
-      });
+      };
 
-      if (!matchResponse.ok) {
-        throw new Error("Face-match service unavailable.");
-      }
-
-      const match = await matchResponse.json();
+      const livenessStatus = live.liveness_status ?? "UNAVAILABLE";
+      const livenessConfidence = typeof live.confidence === "number" ? live.confidence : null;
+      // These live under evidence.* in the service response; reading them
+      // from the top level silently produced nulls on every case.
+      const spoofProbability =
+        typeof live.evidence?.pad?.spoof_probability_median === "number"
+          ? live.evidence.pad.spoof_probability_median
+          : null;
+      const framesAnalyzed =
+        typeof live.evidence?.frames_analyzed === "number" ? live.evidence.frames_analyzed : null;
 
       const biometric: BiometricResult = {
-        livenessStatus: live.liveness_status ?? "UNAVAILABLE",
-        livenessConfidence: typeof live.confidence === "number" ? live.confidence : null,
-
+        provenance: "REAL",
+        livenessStatus,
+        livenessConfidence,
         faceMatchStatus: match.face_match_status ?? "UNAVAILABLE",
-
-        faceSimilarity: typeof match.similarity_score === "number" ? match.similarity_score : null,
-
-        faceThreshold: Number(match.threshold ?? 0.8),
-
-        challenge,
+        faceSimilarity,
+        faceThreshold: faceThreshold ?? 0,
+        challenge: CHALLENGE_SEQUENCE.map((step) => step.label).join(" → "),
+        evidence: {
+          face: faceEvidence,
+          liveness: {
+            status:
+              livenessStatus === "LIVE" ? "passed" : livenessStatus === "SPOOF" ? "fail" : "review",
+            confidence: livenessConfidence,
+            method: live.model ?? "passive PAD",
+            issues: Array.isArray(live.issues) ? live.issues : [],
+            livenessConfidence,
+            spoofProbability,
+            source: "passive",
+            measurements: {
+              framesAnalyzed,
+              faceCrops:
+                typeof live.evidence?.face_crops === "number" ? live.evidence.face_crops : null,
+              model: live.model ?? null,
+              modelVersion: live.model_version ?? null,
+              featureVersion: live.feature_version ?? null,
+              calibrated: live.calibrated === true,
+              quality: live.quality ? JSON.stringify(live.quality) : null,
+            },
+          },
+          challenge: {
+            status: sequencePassed ? "passed" : "fail",
+            confidence: results.length
+              ? Math.min(...results.map((step) => step.confidence ?? 0))
+              : null,
+            method: "YuNet-5-landmark + solvePnP(SQPNP), three-step sequence",
+            issues: results
+              .filter((step) => step.failureReason)
+              .map((step) => `${step.action}: ${step.failureReason}`),
+            source: "active",
+            challenge: CHALLENGE_SEQUENCE.map((step) => step.label).join(" → "),
+            completed: sequencePassed,
+            requestedAction: CHALLENGE_SEQUENCE.map((step) => step.action).join(","),
+            initialPose: results[0]?.initialPose ?? null,
+            observedPose: results[results.length - 1]?.observedPose ?? null,
+            movementDetected: results.some((step) => step.movementDetected),
+            challengeStatus: sequencePassed ? "PASSED" : "FAILED",
+            failureReason: firstFailure
+              ? `${firstFailure.action}: ${firstFailure.failureReason ?? "FAILED"}`
+              : null,
+            measurements: {
+              stepsRequested: CHALLENGE_SEQUENCE.length,
+              stepsPassed: results.filter((step) => step.status === "PASSED").length,
+              validPoseFrames: results.reduce((total, step) => total + step.validPoseFrames, 0),
+              framesCaptured: allFrames.length,
+            },
+          },
+        },
       };
 
       setBioResult(biometric);
 
-      const finalized = finalizeVerification(pending, biometric);
+      const finalized = finalizeVerification(pending, biometric, {
+        autoHoldWatchlist: autoHold,
+      });
 
       const created = addCase(
-        {
-          ...finalized,
-          createdAt: new Date().toISOString(),
-        },
+        { ...finalized, createdAt: new Date().toISOString() },
         caseId,
       );
 
       setLatest(created);
       setPending(null);
-
       stopCamera();
 
       toast.success(`Verification complete · ${created.id}`);
     } catch (error) {
       console.error("Biometric verification error:", error);
-
+      setActiveStep(null);
+      setChallengeState("FAILED");
       toast.error(error instanceof Error ? error.message : "Biometric verification failed.");
     } finally {
       setBiometricBusy(false);
     }
-  }
-
-  function runDemoScenario(kind: "valid" | "spoof" | "wrong-person" | "inconsistent") {
-    const id = newCaseId();
-
-    const common = {
-      createdAt: new Date().toISOString(),
-      fileName: `demo-${kind}.jpg`,
-      documentType: "passport",
-      documentNumber: kind === "valid" ? "P1234567" : "DEMO-0001",
-      holderName: "Rahul Sharma",
-      nationality: "Indian",
-      dateOfBirth: "2001-05-14",
-      expiryDate: "2031-05-14",
-      watchlistHit: false,
-
-      checks: [
-        {
-          id: "ocr",
-          label: "OCR & data extraction",
-          status: "passed" as const,
-          detail: "98% confidence",
-        },
-        {
-          id: "expiry",
-          label: "Document expiry",
-          status: "passed" as const,
-          detail: "Valid",
-        },
-        {
-          id: "tamper",
-          label: "Tamper analysis",
-          status: kind === "inconsistent" ? ("review" as const) : ("passed" as const),
-          detail: kind === "inconsistent" ? "Field inconsistency simulated" : "No anomalies",
-        },
-      ],
-    };
-
-    const demo =
-      kind === "spoof"
-        ? {
-            livenessStatus: "SPOOF" as const,
-            livenessConfidence: 0.98,
-            faceMatchStatus: "MATCH" as const,
-            faceSimilarity: 0.94,
-            faceThreshold: 0.8,
-            challenge,
-          }
-        : kind === "wrong-person"
-          ? {
-              livenessStatus: "LIVE" as const,
-              livenessConfidence: 0.96,
-              faceMatchStatus: "NO_MATCH" as const,
-              faceSimilarity: 0.42,
-              faceThreshold: 0.8,
-              challenge,
-            }
-          : {
-              livenessStatus: "LIVE" as const,
-              livenessConfidence: 0.97,
-              faceMatchStatus: "MATCH" as const,
-              faceSimilarity: 0.94,
-              faceThreshold: 0.8,
-              challenge,
-            };
-
-    const finalized = finalizeVerification(
-      {
-        ...common,
-        riskScore: 0,
-        decision: "safe",
-        rationale: "Demo scenario",
-        flags:
-          kind === "spoof"
-            ? ["DEMO MODE: spoof attack"]
-            : kind === "wrong-person"
-              ? ["DEMO MODE: wrong person"]
-              : kind === "inconsistent"
-                ? ["DEMO MODE: inconsistent identity"]
-                : ["DEMO MODE"],
-      },
-      demo,
-    );
-
-    const created = addCase(
-      {
-        ...finalized,
-        createdAt: common.createdAt,
-      },
-      id,
-    );
-
-    setLatest(created);
-    setCaseId(id);
-
-    toast.success(`DEMO MODE · ${created.decision.toUpperCase()}`);
   }
 
   function clearAll() {
@@ -436,6 +525,9 @@ function VerifyPage() {
     setPending(null);
     setLatest(null);
     setBioResult(null);
+    setChallengeState("READY");
+    setActiveStep(null);
+    setStepResults([]);
     setCaseId(null);
 
     if (inputRef.current) {
@@ -603,14 +695,82 @@ function VerifyPage() {
             ) : null}
 
             {cameraOpen ? (
-              <div className="rounded-lg border bg-muted p-3 text-sm">
-                <div className="font-semibold">Active challenge</div>
+              <div className="space-y-3 rounded-lg border bg-muted p-3 text-sm">
+                <div>
+                  <div className="font-semibold">Active liveness challenge</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Three movements, in order. Each one is verified from head
+                    pose on the server.
+                  </div>
+                </div>
 
-                <div className="mt-1 text-primary">“{challenge}”</div>
+                <ol className="space-y-1.5">
+                  {CHALLENGE_SEQUENCE.map((step, index) => {
+                    const result = stepResults.find((item) => item.action === step.action);
+                    const running = activeStep?.action === step.action;
+                    return (
+                      <li
+                        key={step.action}
+                        className={cn(
+                          "flex items-start gap-2 rounded-md px-2 py-1.5",
+                          running && "bg-background",
+                        )}
+                      >
+                        <span className="mt-0.5 font-mono text-xs text-muted-foreground">
+                          {index + 1}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span
+                            className={cn(
+                              "block",
+                              running ? "font-semibold text-primary" : "text-foreground",
+                            )}
+                          >
+                            {step.label}
+                          </span>
+                          <span className="block text-xs text-muted-foreground">
+                            {running ? step.hint : result?.failureReason ?? step.hint}
+                          </span>
+                        </span>
+                        <span
+                          className={cn(
+                            "mt-0.5 text-xs font-semibold",
+                            result?.status === "PASSED"
+                              ? "text-success"
+                              : result?.status === "FAILED"
+                                ? "text-destructive"
+                                : "text-muted-foreground",
+                          )}
+                        >
+                          {result?.status ?? (running ? "…" : "—")}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ol>
 
-                <div className="mt-1 text-xs text-muted-foreground">
-                  The bundled detector currently provides passive PAD; challenge completion is
-                  operator guidance and is not counted as a passed signal.
+                <div className="flex items-center justify-between rounded-md bg-background px-3 py-2">
+                  <span className="text-xs font-medium uppercase tracking-wide">Sequence state</span>
+                  <span
+                    className={cn(
+                      "font-semibold",
+                      challengeState === "PASSED"
+                        ? "text-success"
+                        : challengeState === "FAILED"
+                          ? "text-destructive"
+                          : "text-primary",
+                    )}
+                  >
+                    {challengeState}
+                  </span>
+                </div>
+
+                <div className="border-t pt-3">
+                  <div className="font-semibold">Passive liveness</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Presentation-attack detection runs over the frames from all
+                    three steps, independently of whether the movements passed.
+                  </div>
                 </div>
               </div>
             ) : null}
@@ -642,8 +802,18 @@ function VerifyPage() {
             {bioResult ? (
               <div className="grid gap-2 text-sm">
                 <BioLine
+                  ok={bioResult.evidence?.challenge?.challengeStatus === "PASSED"}
+                  label="Active challenge"
+                  value={
+                    bioResult.evidence?.challenge?.challengeStatus === "PASSED"
+                      ? "PASSED"
+                      : bioResult.evidence?.challenge?.failureReason ?? "FAILED"
+                  }
+                />
+
+                <BioLine
                   ok={bioResult.livenessStatus === "LIVE"}
-                  label="Liveness"
+                  label="Passive liveness"
                   value={bioResult.livenessStatus}
                 />
 
@@ -653,9 +823,37 @@ function VerifyPage() {
                   value={
                     bioResult.faceSimilarity == null
                       ? bioResult.faceMatchStatus
-                      : `${Math.round(bioResult.faceSimilarity * 100)}% similarity`
+                      : `${bioResult.faceMatchStatus} · similarity ${bioResult.faceSimilarity.toFixed(4)}`
                   }
                 />
+
+                {stepResults.length > 0 ? (
+                  <div className="rounded-lg border bg-muted p-3 text-xs">
+                    <div className="font-semibold">Challenge evidence</div>
+                    <div className="mt-2 space-y-1.5">
+                      {stepResults.map((step) => (
+                        <div key={step.action} className="flex items-baseline justify-between gap-3">
+                          <span className="font-mono">{step.action}</span>
+                          <span className="text-muted-foreground">
+                            {step.observedPose
+                              ? `yaw ${step.observedPose.yaw}° · pitch ${step.observedPose.pitch}°`
+                              : step.failureReason ?? "no pose"}
+                          </span>
+                          <span
+                            className={
+                              step.status === "PASSED" ? "text-success" : "text-destructive"
+                            }
+                          >
+                            {step.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-2 text-muted-foreground">
+                      Yaw is an uncalibrated model-relative angle, not a measured head angle.
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </CardContent>
@@ -682,7 +880,7 @@ function VerifyPage() {
                 <RiskRing score={displayed.riskScore} decision={displayed.decision} />
 
                 <div>
-                  <DecisionBadge decision={displayed.decision} />
+                  <DecisionBadge decision={displayed.decision} finalDecision={displayed.finalDecision} />
 
                   <p className="mt-2 text-sm text-muted-foreground">
                     Risk score · {displayed.riskScore} / 100
@@ -692,6 +890,25 @@ function VerifyPage() {
 
               <div>
                 <ScanChecks checks={displayed.checks} />
+
+                <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  <EvidenceCard label="Document status" value={displayed.evidence?.document?.status ?? "unknown"} />
+                  <EvidenceCard label="MRZ status" value={displayed.evidence?.mrz?.status ?? "unknown"} />
+                  <EvidenceCard
+                    label="Document quality"
+                    value={displayed.evidence?.document?.quality?.resolutionOk === false ? "review" : displayed.evidence?.document?.quality ? "evaluated" : "unavailable"}
+                  />
+                  <EvidenceCard
+                    label="Face match"
+                    value={displayed.biometric?.faceMatchStatus ?? "UNAVAILABLE"}
+                    detail={displayed.biometric?.faceSimilarity == null ? undefined : `similarity ${displayed.biometric.faceSimilarity.toFixed(4)} · distance ${displayed.evidence?.face?.distance?.toFixed(4) ?? "—"}`}
+                  />
+                  <EvidenceCard label="Passive liveness" value={displayed.biometric?.livenessStatus ?? "UNAVAILABLE"} detail={displayed.biometric?.livenessConfidence == null ? undefined : `${Math.round(displayed.biometric.livenessConfidence * 100)}% confidence`} />
+                  <EvidenceCard label="Active challenge" value={displayed.evidence?.challenge?.challengeStatus ?? "NOT_RUN"} />
+                  <EvidenceCard label="Identity record" value={displayed.evidence?.identity?.provider ?? "UNVERIFIED"} detail={displayed.evidence?.identity?.authoritative ? "authoritative" : "not authoritative"} />
+                  <EvidenceCard label="Watchlist" value={displayed.watchlistHit ? "MATCH" : "CLEAR"} />
+                  <EvidenceCard label="Final risk" value={`${displayed.riskScore} / 100`} />
+                </div>
 
                 <p className="mt-4 text-sm text-muted-foreground">{displayed.rationale}</p>
               </div>
@@ -705,33 +922,16 @@ function VerifyPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>DEMO MODE</CardTitle>
+    </div>
+  );
+}
 
-          <CardDescription>
-            Clearly labeled simulated outcomes for the hackathon presentation.
-          </CardDescription>
-        </CardHeader>
-
-        <CardContent className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => runDemoScenario("valid")}>
-            Valid person
-          </Button>
-
-          <Button variant="outline" onClick={() => runDemoScenario("spoof")}>
-            Spoof attack
-          </Button>
-
-          <Button variant="outline" onClick={() => runDemoScenario("wrong-person")}>
-            Wrong person
-          </Button>
-
-          <Button variant="outline" onClick={() => runDemoScenario("inconsistent")}>
-            Inconsistent identity
-          </Button>
-        </CardContent>
-      </Card>
+function EvidenceCard({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <div className="rounded-lg border bg-muted/50 px-3 py-2.5">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-1 font-mono text-sm font-semibold">{value}</div>
+      {detail ? <div className="mt-1 text-[11px] text-muted-foreground">{detail}</div> : null}
     </div>
   );
 }

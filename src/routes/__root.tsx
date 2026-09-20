@@ -1,9 +1,7 @@
 import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-router";
-import { AuthProvider } from "@/lib/auth/provider";
-import { PreviewHostBridge } from "@/components/preview-host-bridge";
 import appCss from "../styles.css?url";
 
-const APP_NAME = "CYBERSHIELD 3.1";
+const APP_NAME = "CYBERSHIELD 3.1.8";
 
 export const Route = createRootRoute({
   head: () => ({
@@ -15,7 +13,7 @@ export const Route = createRootRoute({
       {
         name: "description",
         content:
-          "CYBERSHIELD 3.1 is an AI-assisted travel-document verification workspace for checkpoint officers.",
+          "CYBERSHIELD is a document and biometric verification workspace for checkpoint officers.",
       },
     ],
     links: [
@@ -27,8 +25,6 @@ export const Route = createRootRoute({
         href: "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap",
       },
       { rel: "stylesheet", href: appCss },
-      { rel: "manifest", href: "/__grok/manifest.webmanifest" },
-      { rel: "apple-touch-icon", href: "/__grok/icon-180.png" },
     ],
   }),
   component: () => (
@@ -37,10 +33,7 @@ export const Route = createRootRoute({
         <HeadContent />
       </head>
       <body>
-        <PreviewHostBridge />
-        <AuthProvider>
-          <Outlet />
-        </AuthProvider>
+        <Outlet />
         <Scripts />
       </body>
     </html>

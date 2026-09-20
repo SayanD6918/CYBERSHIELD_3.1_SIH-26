@@ -5,104 +5,9 @@ import type {
   Decision,
   OfficerSettings,
   WatchlistEntry,
-} from "./types";
+} from "./types.ts";
 
-export const SEED_CASES: CaseRecord[] = [
-  {
-    id: "BS-2026-00481",
-    createdAt: "2026-08-28T15:30:00.000Z",
-    documentType: "passport",
-    documentNumber: "P882142",
-    holderName: "Elena Voss",
-    nationality: "NLD",
-    dateOfBirth: "1991-04-12",
-    expiryDate: "2029-08-18",
-    riskScore: 64,
-    decision: "manual",
-    checks: [
-      { id: "ocr", label: "OCR & data extraction", status: "passed", detail: "96% confidence" },
-      { id: "expiry", label: "Document expiry", status: "passed", detail: "Valid until 2029" },
-      { id: "tamper", label: "Tamper analysis", status: "review", detail: "Print-pattern irregularity" },
-      { id: "face", label: "Face match", status: "review", detail: "78% match" },
-      { id: "liveness", label: "Liveness detection", status: "passed", detail: "Passed" },
-    ],
-    rationale:
-      "Portrait lighting and microprint on the biodata page need a supervisor check before clearance.",
-    flags: ["Face match below 80%", "Print-pattern irregularity"],
-    fileName: "passport-voss.jpg",
-    watchlistHit: false,
-  },
-  {
-    id: "BS-2026-00480",
-    createdAt: "2026-08-28T15:14:00.000Z",
-    documentType: "visa",
-    documentNumber: "V441219",
-    holderName: "Jonah Park",
-    nationality: "KOR",
-    dateOfBirth: "1988-11-02",
-    expiryDate: "2027-01-09",
-    riskScore: 18,
-    decision: "safe",
-    checks: [
-      { id: "ocr", label: "OCR & data extraction", status: "passed", detail: "99% confidence" },
-      { id: "expiry", label: "Document expiry", status: "passed", detail: "Valid" },
-      { id: "tamper", label: "Tamper analysis", status: "passed", detail: "No anomalies" },
-      { id: "face", label: "Face match", status: "passed", detail: "94% match" },
-      { id: "liveness", label: "Liveness detection", status: "passed", detail: "Passed" },
-    ],
-    rationale: "Machine-readable visa fields and portrait match are consistent.",
-    flags: [],
-    fileName: "visa-park.jpg",
-    watchlistHit: false,
-  },
-  {
-    id: "BS-2026-00479",
-    createdAt: "2026-08-28T14:46:00.000Z",
-    documentType: "passport",
-    documentNumber: "P190407",
-    holderName: "Viktor Hale",
-    nationality: "UNK",
-    dateOfBirth: "1979-06-30",
-    expiryDate: "2026-12-01",
-    riskScore: 91,
-    decision: "hold",
-    checks: [
-      { id: "ocr", label: "OCR & data extraction", status: "passed", detail: "91% confidence" },
-      { id: "expiry", label: "Document expiry", status: "passed", detail: "Valid" },
-      { id: "tamper", label: "Tamper analysis", status: "fail", detail: "UV pattern mismatch" },
-      { id: "face", label: "Face match", status: "review", detail: "61% match" },
-      { id: "liveness", label: "Liveness detection", status: "unavailable", detail: "Still image only" },
-    ],
-    rationale: "Watchlist match plus tamper indicators. Do not clear.",
-    flags: ["Watchlist match", "UV pattern mismatch"],
-    fileName: "passport-hale.jpg",
-    watchlistHit: true,
-  },
-  {
-    id: "BS-2026-00478",
-    createdAt: "2026-08-28T12:32:00.000Z",
-    documentType: "permit",
-    documentNumber: "R773263",
-    holderName: "Amira Cole",
-    nationality: "CAN",
-    dateOfBirth: "1996-02-21",
-    expiryDate: "2028-05-14",
-    riskScore: 11,
-    decision: "safe",
-    checks: [
-      { id: "ocr", label: "OCR & data extraction", status: "passed", detail: "98% confidence" },
-      { id: "expiry", label: "Document expiry", status: "passed", detail: "Valid" },
-      { id: "tamper", label: "Tamper analysis", status: "passed", detail: "No anomalies" },
-      { id: "face", label: "Face match", status: "passed", detail: "97% match" },
-      { id: "liveness", label: "Liveness detection", status: "passed", detail: "Passed" },
-    ],
-    rationale: "Residence permit fields are intact and biometrics align.",
-    flags: [],
-    fileName: "permit-cole.jpg",
-    watchlistHit: false,
-  },
-];
-
+/** Starter watchlist so the feature is exercisable on a fresh install. */
 const SEED_WATCHLIST: WatchlistEntry[] = [
   {
     id: "wl-1",
@@ -118,12 +23,10 @@ const SEED_WATCHLIST: WatchlistEntry[] = [
   },
 ];
 
-const BASELINE = {
-  total: 1280,
-  safe: 1100,
-  manual: 142,
-  hold: 38,
-};
+export const DEFAULT_OFFICER_NAME = "Sayan DN";
+
+/** Officer names shipped by earlier builds, replaced on rehydration. */
+const SUPERSEDED_OFFICER_NAMES = new Set(["Sayan Debnath", "Arnab K."]);
 
 type AppState = {
   hydrated: boolean;
@@ -136,20 +39,25 @@ type AppState = {
   addWatchlist: (name: string, reason: string) => void;
   removeWatchlist: (id: string) => void;
   updateSettings: (patch: Partial<OfficerSettings>) => void;
-  resetDemo: () => void;
+  clearCases: () => void;
 };
 
 function countDecision(cases: CaseRecord[], decision: Decision): number {
   return cases.filter((item) => item.decision === decision).length;
 }
 
+/**
+ * Counts over the cases actually processed on this machine.
+ *
+ * Earlier builds padded these with 1,280 invented historical cases, which
+ * made the overview look like a system in service rather than a prototype.
+ */
 export function computeStats(cases: CaseRecord[]) {
-  const extra = cases.filter((item) => !SEED_CASES.some((seed) => seed.id === item.id));
   return {
-    total: BASELINE.total + SEED_CASES.length + extra.length,
-    safe: BASELINE.safe + countDecision(SEED_CASES, "safe") + countDecision(extra, "safe"),
-    manual: BASELINE.manual + countDecision(SEED_CASES, "manual") + countDecision(extra, "manual"),
-    hold: BASELINE.hold + countDecision(SEED_CASES, "hold") + countDecision(extra, "hold"),
+    total: cases.length,
+    safe: countDecision(cases, "safe"),
+    manual: countDecision(cases, "manual"),
+    hold: countDecision(cases, "hold"),
   };
 }
 
@@ -157,25 +65,28 @@ export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
       hydrated: false,
-      cases: SEED_CASES,
+      cases: [],
       watchlist: SEED_WATCHLIST,
       settings: {
-        officerName: "Sayan Debnath",
+        officerName: DEFAULT_OFFICER_NAME,
         officerRole: "Checkpoint officer",
         checkpoint: "Checkpoint 04",
         autoHoldWatchlist: true,
       },
-      nextSerial: 482,
+      nextSerial: 1,
       setHydrated: (value) => set({ hydrated: value }),
-      addCase: (record) => {
+      addCase: (record, caseId) => {
+        // The verify page mints an ID and shows it to the officer for the
+        // whole session. Ignoring it here meant the ID on screen never
+        // matched the ID in the case list.
         const serial = get().nextSerial;
         const created: CaseRecord = {
           ...record,
-          id: `BS-2026-${String(serial).padStart(5, "0")}`,
+          id: caseId ?? `BS-2026-${String(serial).padStart(5, "0")}`,
         };
         set({
           cases: [created, ...get().cases],
-          nextSerial: serial + 1,
+          nextSerial: caseId ? serial : serial + 1,
         });
         return created;
       },
@@ -194,18 +105,8 @@ export const useAppStore = create<AppState>()(
       updateSettings: (patch) => {
         set({ settings: { ...get().settings, ...patch } });
       },
-      resetDemo: () => {
-        set({
-          cases: SEED_CASES,
-          watchlist: SEED_WATCHLIST,
-          nextSerial: 482,
-          settings: {
-            officerName: "Arnab K.",
-            officerRole: "Checkpoint officer",
-            checkpoint: "Checkpoint 04",
-            autoHoldWatchlist: true,
-          },
-        });
+      clearCases: () => {
+        set({ cases: [], nextSerial: 1 });
       },
     }),
     {
@@ -217,6 +118,28 @@ export const useAppStore = create<AppState>()(
         settings: state.settings,
         nextSerial: state.nextSerial,
       }),
+      merge: (persisted, current) => {
+        const state = persisted as Partial<AppState>;
+        // Cases written by an earlier build's demo generator are dropped on
+        // load; nothing fabricated should survive into the case history.
+        const persistedCases = Array.isArray(state.cases) ? state.cases : [];
+        const realCases = persistedCases.filter((item) => item.provenance !== "DEMO");
+
+        // Browsers that used an earlier build still hold the old officer
+        // name in localStorage, so carry it forward to the current one.
+        const settings = { ...current.settings, ...(state.settings ?? {}) };
+        if (SUPERSEDED_OFFICER_NAMES.has(settings.officerName)) {
+          settings.officerName = DEFAULT_OFFICER_NAME;
+        }
+
+        return {
+          ...current,
+          ...state,
+          settings,
+          cases: realCases,
+          watchlist: Array.isArray(state.watchlist) ? state.watchlist : current.watchlist,
+        };
+      },
     },
   ),
 );

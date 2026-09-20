@@ -35,7 +35,7 @@ export function CaseDetailDialog({
               <RiskRing score={record.riskScore} decision={record.decision} />
 
               <div className="min-w-0 flex-1 space-y-2">
-                <DecisionBadge decision={record.decision} />
+                <DecisionBadge decision={record.decision} finalDecision={record.finalDecision} />
 
                 <div>
                   <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">

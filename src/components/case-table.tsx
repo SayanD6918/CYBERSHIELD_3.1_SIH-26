@@ -53,15 +53,15 @@ export function CaseTable({
               <td
                 className={cn(
                   "px-3 py-3.5 font-mono tabular-nums",
-                  item.decision === "safe" && "text-success",
-                  item.decision === "manual" && "text-warning",
-                  item.decision === "hold" && "text-danger",
+                  item.finalDecision === "VERIFIED" || item.decision === "safe" ? "text-success" :
+                  item.finalDecision === "NOT_VERIFIED" || item.decision === "hold" ? "text-danger" :
+                  "text-warning",
                 )}
               >
                 {item.riskScore} / 100
               </td>
               <td className="px-3 py-3.5">
-                <DecisionBadge decision={item.decision} />
+                <DecisionBadge decision={item.decision} finalDecision={item.finalDecision} />
               </td>
               <td className="hidden px-3 py-3.5 text-muted-foreground sm:table-cell">
                 {hydrated ? formatCaseTime(item.createdAt) : "—"}

@@ -14,7 +14,7 @@ export const Route = createFileRoute("/_app/settings")({
 function SettingsPage() {
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
-  const resetDemo = useAppStore((s) => s.resetDemo);
+  const clearCases = useAppStore((s) => s.clearCases);
 
   return (
     <div className="space-y-6">
@@ -80,24 +80,32 @@ function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Demo data</CardTitle>
+          <CardTitle>Verification provenance</CardTitle>
           <CardDescription>
-            Cases and watchlist entries are stored in this browser only.
+            Every case in this workspace comes from the live document and
+            biometric pipeline. No sample history, and no mock identity data,
+            is consulted.
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
+          <div className="rounded-xl bg-muted px-4 py-3 text-sm text-muted-foreground">
+            The identity provider is non-authoritative until a real issuer
+            integration is configured, so a case cannot reach VERIFIED on
+            biometric evidence alone.
+          </div>
           <Button
             type="button"
             variant="outline"
             onClick={() => {
-              resetDemo();
-              toast.success("Workspace reset to the sample desk");
+              clearCases();
+              toast.success("Case history cleared");
             }}
           >
-            Reset sample cases
+            Clear case history
           </Button>
         </CardContent>
       </Card>
+
     </div>
   );
 }
