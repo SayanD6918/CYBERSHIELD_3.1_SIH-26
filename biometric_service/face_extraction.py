@@ -85,5 +85,9 @@ def select_single_face(image: np.ndarray, detections: list[FaceDetection]) -> Ex
     y0 = max(0, int(round(y)))
     x1 = min(image.shape[1], int(round(x + w)))
     y1 = min(image.shape[0], int(round(y + h)))
-    crop = image[y0:y1, x0:x1]
-    return ExtractedFace(crop, detection, _quality(image, detection, len(detections)))
+    # Keep the original frame together with the full-frame detection. SFace
+    # alignCrop() expects the detection coordinates and landmarks to refer to
+    # the image passed to it. Passing the cropped face here while retaining
+    # full-frame coordinates shifts the alignment window and can make live
+    # embeddings fail or become invalid.
+    return ExtractedFace(image, detection, _quality(image, detection, len(detections)))

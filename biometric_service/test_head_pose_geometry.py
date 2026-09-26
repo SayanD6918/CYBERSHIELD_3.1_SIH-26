@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import unittest
 
+import cv2
 import numpy as np
 
 from active_challenge import (
@@ -118,3 +119,40 @@ class HeadPoseGeometryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ProductionModelGeometryTests(unittest.TestCase):
+    def test_production_model_recovers_known_yaw_angles(self):
+        """Use MODEL_POINTS itself, not a separate fixture, for the estimator test."""
+        from active_challenge import MODEL_POINTS, _camera_matrix
+
+        width, height = FRAME_WIDTH, FRAME_HEIGHT
+        camera = _camera_matrix(width, height)
+        distortion = np.zeros((4, 1), dtype=np.float64)
+        recovered = []
+
+        for expected_yaw in (-30, -20, -10, 0, 10, 20, 30):
+            angle = np.radians(-expected_yaw)
+            rotation = np.array(
+                [
+                    [np.cos(angle), 0.0, np.sin(angle)],
+                    [0.0, 1.0, 0.0],
+                    [-np.sin(angle), 0.0, np.cos(angle)],
+                ],
+                dtype=np.float64,
+            )
+            rvec, _ = cv2.Rodrigues(rotation)
+            translation = np.array([[0.0], [0.0], [1000.0]], dtype=np.float64)
+            projected, _ = cv2.projectPoints(
+                MODEL_POINTS, rvec, translation, camera, distortion
+            )
+            detection = FaceDetection(
+                (0.0, 0.0, 200.0, 250.0),
+                projected.reshape(-1, 2).astype(np.float32),
+                0.99,
+            )
+            pose = estimate_head_pose(detection, (height, width))
+            recovered.append(pose.yaw)
+            self.assertAlmostEqual(pose.yaw, expected_yaw, delta=0.25)
+            self.assertLess(pose.reprojection_error, 0.01)
+
+        self.assertEqual(recovered, sorted(recovered))

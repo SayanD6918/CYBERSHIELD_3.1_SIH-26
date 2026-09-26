@@ -112,19 +112,18 @@ export const useAppStore = create<AppState>()(
     {
       name: "cybershield-v1",
       skipHydration: true,
+      // Case records contain security-sensitive decisions and biometric
+      // evidence. They are intentionally NOT persisted to browser storage;
+      // localStorage is UI convenience only, never the source of truth.
       partialize: (state) => ({
-        cases: state.cases,
         watchlist: state.watchlist,
         settings: state.settings,
-        nextSerial: state.nextSerial,
       }),
       merge: (persisted, current) => {
         const state = persisted as Partial<AppState>;
-        // Cases written by an earlier build's demo generator are dropped on
-        // load; nothing fabricated should survive into the case history.
-        const persistedCases = Array.isArray(state.cases) ? state.cases : [];
-        const realCases = persistedCases.filter((item) => item.provenance !== "DEMO");
 
+        // Browser-persisted cases from earlier builds are deliberately not
+        // trusted. A refresh starts with no authoritative case history.
         // Browsers that used an earlier build still hold the old officer
         // name in localStorage, so carry it forward to the current one.
         const settings = { ...current.settings, ...(state.settings ?? {}) };
@@ -136,7 +135,7 @@ export const useAppStore = create<AppState>()(
           ...current,
           ...state,
           settings,
-          cases: realCases,
+          cases: [],
           watchlist: Array.isArray(state.watchlist) ? state.watchlist : current.watchlist,
         };
       },

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 
 import cv2
 import numpy as np
 
 MODEL_NAME = "YuNet face_detection_yunet_2023mar.onnx"
+MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "face_detection_yunet_2023mar.onnx"
 
 
@@ -85,6 +87,17 @@ class YuNetDetector:
                 f"YuNet model not found at {self.model_path}. "
                 "Download face_detection_yunet_2023mar.onnx and set YUNET_MODEL_PATH "
                 "or place it under biometric_service/models/."
+            )
+            return
+        try:
+            digest = hashlib.sha256(self.model_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            self._load_error = f"Could not read YuNet model at {self.model_path}: {exc}"
+            return
+        if digest != MODEL_SHA256:
+            self._load_error = (
+                f"YuNet model SHA-256 mismatch at {self.model_path}: "
+                f"expected {MODEL_SHA256}, got {digest}"
             )
             return
         if not hasattr(cv2, "FaceDetectorYN_create"):

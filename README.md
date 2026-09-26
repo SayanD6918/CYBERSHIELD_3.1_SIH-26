@@ -1,3 +1,10 @@
+
+## Phase 3 security boundary
+
+The production verification route now sends raw document/camera evidence to the TanStack Start application server. The server independently runs document analysis, invokes the biometric service for PASS3D/PAD/SFace, and performs evidence fusion/risk calculation. Client-calculated biometric results, risk scores, decisions, and browser watchlists are not authoritative. Security-sensitive case records are not persisted in browser localStorage.
+
+Current validation status: **SFace NOT CALIBRATED · PAD NOT EVALUATED · real-camera validation NOT VALIDATED · performance NOT BENCHMARKED**. See `PHASE3_FINAL_HARDENING_REPORT.md`.
+
 # CyberShield biometric service
 
 FastAPI service exposing three deliberately independent signals. None of

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from sklearn.metrics import precision_score, recall_score, roc_auc_score
 
 from document_portrait import extract_document_portrait
 from face_detection import DEFAULT_MODEL_PATH, YuNetDetector
@@ -42,13 +43,13 @@ class Subject:
     failures: list[str]
 
 
-def _document_embedding(path: Path, detector, recognizer, failures: list[str]):
+def _document_embedding(path: Path, detector, recognizer, failures: list[str], document_type: str):
     image = cv2.imread(str(path))
     if image is None:
         failures.append(f"document_unreadable:{path.name}")
         return None
 
-    portrait = extract_document_portrait(image, detector)
+    portrait = extract_document_portrait(image, detector, document_type=document_type)
     if portrait.status != "selected" or portrait.selected is None:
         failures.append(f"portrait_{portrait.status}:{','.join(portrait.issues) or 'unknown'}")
         return None
@@ -72,7 +73,7 @@ def _live_embeddings(directory: Path, detector, recognizer, failures: list[str])
     return embeddings
 
 
-def load_subjects(root: Path, detector, recognizer) -> list[Subject]:
+def load_subjects(root: Path, detector, recognizer, document_type: str = "aadhaar") -> list[Subject]:
     subjects: list[Subject] = []
     for directory in sorted(p for p in root.iterdir() if p.is_dir()):
         failures: list[str] = []
@@ -83,7 +84,7 @@ def load_subjects(root: Path, detector, recognizer) -> list[Subject]:
         live_dir = directory / "live"
 
         document_embedding = (
-            _document_embedding(documents[0], detector, recognizer, failures)
+            _document_embedding(documents[0], detector, recognizer, failures, document_type)
             if documents
             else None
         )
@@ -144,6 +145,7 @@ def main() -> None:
     parser.add_argument("--yunet", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--sface", type=Path, default=DEFAULT_RECOGNITION_MODEL)
     parser.add_argument("--threshold", type=float, default=None, help="Operating point to report.")
+    parser.add_argument("--document-type", default="aadhaar", help="Document type passed to portrait extraction (default: aadhaar).")
     args = parser.parse_args()
 
     detector = YuNetDetector(args.yunet)
@@ -155,7 +157,7 @@ def main() -> None:
 
     operating_threshold = args.threshold if args.threshold is not None else recognizer.match_threshold
 
-    subjects = load_subjects(args.dataset, detector, recognizer)
+    subjects = load_subjects(args.dataset, detector, recognizer, args.document_type)
     genuine, impostor, usable = score_pairs(subjects, recognizer)
 
     if genuine.size == 0 or impostor.size == 0:
@@ -166,17 +168,23 @@ def main() -> None:
 
     thresholds = np.round(np.arange(0.00, 1.001, 0.01), 4)
     points = operating_points(genuine, impostor, thresholds)
-    at_operating = next(p for p in points if abs(p["threshold"] - round(operating_threshold, 2)) < 1e-9)
+    operating_frr = float(np.mean(genuine < operating_threshold))
+    operating_far = float(np.mean(impostor >= operating_threshold))
+    at_operating = {
+        "threshold": float(operating_threshold),
+        "frr": operating_frr,
+        "far": operating_far,
+    }
 
     # Confusion matrix at the operating point, in the service's own
     # three-state vocabulary.
     band = recognizer.uncertain_band
     def classify(score: float) -> str:
-        if score >= operating_threshold:
+        if score >= operating_threshold + band:
             return "MATCH"
-        if score >= operating_threshold - band:
-            return "UNCERTAIN"
-        return "NO_MATCH"
+        if score <= operating_threshold - band:
+            return "NO_MATCH"
+        return "UNCERTAIN"
 
     confusion = {
         "genuine": {state: 0 for state in ("MATCH", "UNCERTAIN", "NO_MATCH")},
@@ -187,12 +195,20 @@ def main() -> None:
     for score in impostor:
         confusion["impostor"][classify(float(score))] += 1
 
+    y_true = np.concatenate([np.ones(genuine.size, dtype=int), np.zeros(impostor.size, dtype=int)])
+    y_score = np.concatenate([genuine, impostor])
+    roc_auc = float(roc_auc_score(y_true, y_score)) if len(np.unique(y_true)) == 2 else None
+    predicted = (y_score >= operating_threshold).astype(int)
+
     report = {
         "metric": "cosine_similarity",
         "note": "Similarity is a distance-derived score, not a probability of identity.",
         "model": "SFace/face_recognition_sface_2021dec",
         "operating_threshold": operating_threshold,
         "uncertain_band": band,
+        "document_type": args.document_type,
+        "genuine_similarity_values": [float(v) for v in genuine],
+        "impostor_similarity_values": [float(v) for v in impostor],
         "subjects_total": len(subjects),
         "subjects_usable": len(usable),
         "genuine_pairs": int(genuine.size),
@@ -209,6 +225,9 @@ def main() -> None:
         },
         "at_operating_threshold": at_operating,
         "equal_error_rate": equal_error_rate(points),
+        "roc_auc": roc_auc,
+        "precision_at_operating_threshold": float(precision_score(y_true, predicted, zero_division=0)),
+        "recall_at_operating_threshold": float(recall_score(y_true, predicted, zero_division=0)),
         "three_state_confusion": confusion,
         "det_curve": points,
         "per_subject_failures": {s.subject_id: s.failures for s in subjects if s.failures},
@@ -218,7 +237,7 @@ def main() -> None:
     summary = {k: report[k] for k in (
         "genuine_pairs", "impostor_pairs", "at_operating_threshold", "equal_error_rate"
     )}
-    print(json.dumps(summary, indent=2))
+    print(json.dumps({**summary, "roc_auc": roc_auc}, indent=2))
     print("Full report:", args.output)
 
 

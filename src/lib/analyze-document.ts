@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import type { CaseRecord, CheckStatus, DocumentEvidence, MRZEvidence, ScanCheck } from "./types.ts";
+import type { CaseRecord, CheckStatus, DocumentEvidence, DocumentType, MRZEvidence, ScanCheck } from "./types.ts";
 import type { DocumentImageQuality } from "./document-image.ts";
 import { parseDocumentText } from "./document-parser.ts";
 import { watchlistMatch } from "./watchlist.ts";
@@ -25,8 +25,9 @@ const InputSchema = z.object({
 });
 
 type DocumentAnalysis = {
-  documentType: string;
+  documentType: DocumentType;
   documentNumber: string | null;
+  aadhaarNumberStatus: "full" | "masked" | "not_detected";
   holderName: string | null;
   nationality: string | null;
   dateOfBirth: string | null;
@@ -79,6 +80,7 @@ function ocrUnavailable(reason: string, quality?: DocumentImageQuality | null): 
   return {
     documentType: "unknown",
     documentNumber: null,
+    aadhaarNumberStatus: "not_detected",
     holderName: null,
     nationality: null,
     dateOfBirth: null,
@@ -148,7 +150,7 @@ function medianOcrConfidence(tsv: string): number | null {
   return Math.round(median);
 }
 
-async function readDocument(
+export async function readDocument(
   imageDataUrl: string,
   imageQuality?: DocumentImageQuality | null,
 ): Promise<DocumentAnalysis> {
@@ -267,6 +269,7 @@ async function readDocument(
     return {
       documentType: parsed.documentType,
       documentNumber: parsed.documentNumber,
+      aadhaarNumberStatus: parsed.aadhaarNumberStatus,
       holderName: parsed.holderName,
       nationality: parsed.nationality,
       dateOfBirth: parsed.dateOfBirth,
@@ -289,6 +292,7 @@ async function readDocument(
           issues: [...qualityIssues, ...fieldIssues],
           documentType: parsed.documentType,
           documentNumber: parsed.documentNumber,
+          aadhaarNumberStatus: parsed.aadhaarNumberStatus,
           fields: {
             holderName: parsed.holderName,
             nationality: parsed.nationality,
@@ -313,7 +317,7 @@ async function readDocument(
   }
 }
 
-function buildRecord(
+export function buildRecord(
   analysis: DocumentAnalysis,
   fileName: string,
   watchlistNames: string[],
@@ -367,7 +371,7 @@ function buildRecord(
   ];
 
   return {
-    documentType: analysis.documentType.toLowerCase(),
+    documentType: analysis.documentType,
     documentNumber: analysis.documentNumber?.trim() || "UNKNOWN",
     holderName: analysis.holderName,
     nationality: analysis.nationality,

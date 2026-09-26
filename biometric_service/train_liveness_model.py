@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import cv2
@@ -54,6 +55,25 @@ def face_crop_for_training(image: np.ndarray, detector: YuNetDetector | None) ->
     return crop_face(image, detections[0].box)
 
 
+def subject_id_from_relative(relative: Path) -> str:
+    """Extract a subject identifier from <subject>_session... directories.
+
+    A session identifier is not a subject identifier: using class/session as
+    the split group allows the same person to appear in train and test across
+    multiple sessions. Ambiguous legacy layouts are rejected deliberately.
+    """
+    if not relative.parts:
+        raise ValueError("missing dataset group")
+    session_dir = relative.parts[0]
+    match = re.match(r"^(.+?)[_-]session(?:[_-]?)\d+$", session_dir, re.IGNORECASE)
+    if not match:
+        raise ValueError(
+            f"Ambiguous PAD group '{session_dir}'. Use directories such as "
+            "subject001_session001 so subject-disjoint evaluation is enforceable."
+        )
+    return match.group(1)
+
+
 def collect(root: Path, detector: YuNetDetector | None):
     features: list[np.ndarray] = []
     labels: list[int] = []
@@ -80,11 +100,11 @@ def collect(root: Path, detector: YuNetDetector | None):
                 continue
 
             relative = path.relative_to(base)
-            session = relative.parts[0] if len(relative.parts) > 1 else path.stem
+            subject_id = subject_id_from_relative(relative)
 
             features.append(extract_features(crop))
             labels.append(label)
-            groups.append(f"{name}/{session}")
+            groups.append(subject_id)
 
     if not features:
         raise RuntimeError("No usable training images found")
@@ -120,6 +140,7 @@ def main() -> None:
     )
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--report", type=Path, default=None, help="Optional Markdown report path.")
     args = parser.parse_args()
 
     detector = None if args.pre_cropped else YuNetDetector(args.yunet)
@@ -161,9 +182,26 @@ def main() -> None:
         "test_samples": int(len(test_index)),
         "test_groups": int(len(set(groups[test_index]))),
         "skipped_images": skipped,
-        "grouping": "session-level GroupShuffleSplit",
+        "grouping": "subject-level GroupShuffleSplit",
+        "unique_subjects_train": int(len(set(groups[train_index]))),
+        "unique_subjects_test": int(len(set(groups[test_index]))),
+        "subject_overlap": sorted(set(groups[train_index]) & set(groups[test_index])),
     }
     print(json.dumps(evaluation, indent=2))
+    if evaluation["subject_overlap"]:
+        raise SystemExit("Subject leakage detected between train and test partitions")
+    if args.report:
+        args.report.write_text(
+            "# CyberShield PAD evaluation\n\n"
+            f"- Subjects (train): {evaluation['unique_subjects_train']}\n"
+            f"- Subjects (test): {evaluation['unique_subjects_test']}\n"
+            f"- Test samples: {evaluation['test_samples']}\n"
+            f"- APCER: {evaluation['apcer']:.6f}\n"
+            f"- BPCER: {evaluation['bpcer']:.6f}\n"
+            f"- ACER: {evaluation['acer']:.6f}\n"
+            f"- ROC-AUC: {evaluation['roc_auc']:.6f}\n"
+            f"- Subject overlap: {evaluation['subject_overlap']}\n"
+        )
 
     artifact = {
         "model": classifier,

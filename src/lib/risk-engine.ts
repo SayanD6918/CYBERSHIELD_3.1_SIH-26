@@ -96,20 +96,33 @@ export function calculateRisk(evidence: RiskEvidenceBundle): RiskResult {
     reasons.push("Face comparison is not confirmed");
   }
 
+  // Passive PAD is a mandatory biometric signal whenever the production
+  // verification flow invokes it. SPOOF is a definitive presentation-attack
+  // signal; UNCERTAIN/UNAVAILABLE means evidence is insufficient, not spoof.
   if (evidence.liveness.status === "fail") {
-    score += 20;
-    reasons.push("Passive liveness failed");
+    score += 30;
+    reasons.push("Passive PAD detected a presentation attack");
   } else if (evidence.liveness.status !== "passed") {
-    score += 8;
-    reasons.push("Passive liveness is not confirmed");
+    score += 10;
+    reasons.push("Passive PAD is not confirmed");
   }
 
+  // The active challenge is also mandatory in challenge-enabled mode. A
+  // timeout/face-loss is review evidence; an explicit challenge rejection is
+  // a failed required check.
+  const challengeFailureReason = evidence.challenge.issues.join(" ");
+  const challengeInsufficient = /TIMEOUT|FACE_LOSS|NO_FACE|NOT_ESTABLISHED|MODEL_UNAVAILABLE|UNAVAILABLE|INSUFFICIENT|INVALID_IMAGE/i.test(challengeFailureReason);
   if (evidence.challenge.status === "fail") {
-    score += 20;
-    reasons.push("Active liveness challenge failed");
+    if (challengeInsufficient) {
+      score += 10;
+      reasons.push("Active challenge evidence is insufficient");
+    } else {
+      score += 25;
+      reasons.push("Active challenge failed");
+    }
   } else if (evidence.challenge.status !== "passed") {
-    score += 8;
-    reasons.push("Active liveness challenge is not confirmed");
+    score += 10;
+    reasons.push("Active challenge is not confirmed");
   }
 
   if (evidence.identity.status === "fail") {
@@ -135,7 +148,7 @@ export function calculateRisk(evidence: RiskEvidenceBundle): RiskResult {
     evidence.tamperStatus === "fail" ||
     evidence.face.status === "fail" ||
     evidence.liveness.status === "fail" ||
-    evidence.challenge.status === "fail" ||
+    (evidence.challenge.status === "fail" && !challengeInsufficient) ||
     evidence.identity.status === "fail";
 
   const reviewNeeded =
@@ -155,13 +168,14 @@ export function calculateRisk(evidence: RiskEvidenceBundle): RiskResult {
 
   score = clamp(Math.round(score));
 
-  // A watchlist hit is checked first. Routing a watchlisted subject to
-  // NOT_VERIFIED just because something else also failed would close the
-  // case automatically, when the whole point of a watchlist is that a
-  // person looks at it.
+  // Security-sensitive failures take precedence over routing signals. A
+  // watchlist hit remains visible and reviewable, but it must not downgrade a
+  // confirmed presentation attack or hard biometric/document failure into a
+  // softer lane. This ordering is deterministic and covered by regression tests.
   let finalDecision: FinalDecision;
-  if (evidence.watchlistHit) finalDecision = "MANUAL_REVIEW";
+  if (evidence.liveness.status === "fail") finalDecision = "NOT_VERIFIED";
   else if (hardFailure) finalDecision = "NOT_VERIFIED";
+  else if (evidence.watchlistHit) finalDecision = "MANUAL_REVIEW";
   else if (!evidence.identity.authoritative || reviewNeeded) finalDecision = "UNCERTAIN";
   else finalDecision = "VERIFIED";
 
@@ -190,6 +204,8 @@ export function calculateRisk(evidence: RiskEvidenceBundle): RiskResult {
       watchlistHit: evidence.watchlistHit,
       autoHoldWatchlist: autoHold,
       identityAuthoritative: evidence.identity.authoritative,
+      livenessPassed: evidence.liveness.status === "passed",
+      challengePassed: evidence.challenge.status === "passed",
     },
   };
 

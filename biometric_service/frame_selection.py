@@ -25,8 +25,9 @@ from face_detection import FaceDetection, FaceModelError, YuNetDetector
 # Weights are deliberately blunt. Frontality dominates because off-axis pose
 # costs an embedding comparison far more than a little softness does.
 FRONTALITY_WEIGHT = 0.55
-SHARPNESS_WEIGHT = 0.25
-SIZE_WEIGHT = 0.20
+SHARPNESS_WEIGHT = 0.20
+SIZE_WEIGHT = 0.15
+BRIGHTNESS_WEIGHT = 0.10
 
 # Yaw/pitch magnitude, in the uncalibrated model-relative degrees
 # estimate_head_pose() returns, at which frontality scores zero.
@@ -44,7 +45,9 @@ class ProbeFrame:
     yaw: float | None
     pitch: float | None
     sharpness: float
+    brightness: float
     relative_size: float
+    quality_issues: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -69,10 +72,23 @@ class ProbeSelection:
                     "selected_frame_yaw": None if self.probe.yaw is None else round(self.probe.yaw, 2),
                     "selected_frame_pitch": None if self.probe.pitch is None else round(self.probe.pitch, 2),
                     "selected_frame_sharpness": round(self.probe.sharpness, 3),
+                    "selected_frame_brightness": round(self.probe.brightness, 3),
                     "selected_frame_relative_size": round(self.probe.relative_size, 6),
+                    "selected_frame_quality_issues": list(self.probe.quality_issues),
                 }
             )
         return evidence
+
+
+def _face_brightness(image: np.ndarray, detection: FaceDetection) -> float:
+    x, y, w, h = detection.box
+    height, width = image.shape[:2]
+    x0, y0 = max(0, int(round(x))), max(0, int(round(y)))
+    x1, y1 = min(width, int(round(x + w))), min(height, int(round(y + h)))
+    crop = image[y0:y1, x0:x1]
+    if not crop.size:
+        return 0.0
+    return float(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).mean())
 
 
 def _sharpness(image: np.ndarray, detection: FaceDetection) -> float:
@@ -90,6 +106,16 @@ def score_frame(image: np.ndarray, detection: FaceDetection) -> ProbeFrame:
     height, width = image.shape[:2]
     relative_size = detection.area / float(max(1, width * height))
     sharpness = _sharpness(image, detection)
+    brightness = _face_brightness(image, detection)
+    quality_issues: list[str] = []
+    if min(detection.width, detection.height) < 80:
+        quality_issues.append("FACE_TOO_SMALL")
+    if detection.confidence < 0.9:
+        quality_issues.append("LOW_DETECTION_CONFIDENCE")
+    if sharpness < 35:
+        quality_issues.append("BLURRY_FACE")
+    if brightness < 45 or brightness > 215:
+        quality_issues.append("POOR_EXPOSURE")
 
     try:
         pose = estimate_head_pose(detection, image.shape)
@@ -103,12 +129,16 @@ def score_frame(image: np.ndarray, detection: FaceDetection) -> ProbeFrame:
         yaw = pitch = None
         frontality = 0.5
 
+    brightness_score = max(0.0, 1.0 - abs(brightness - 128.0) / 128.0)
     score = (
         FRONTALITY_WEIGHT * frontality
         + SHARPNESS_WEIGHT * min(1.0, sharpness / SHARPNESS_REFERENCE)
         + SIZE_WEIGHT * min(1.0, relative_size / SIZE_REFERENCE)
+        + BRIGHTNESS_WEIGHT * brightness_score
     )
-    return ProbeFrame(-1, image, detection, score, yaw, pitch, sharpness, relative_size)
+    if off_axis > MAX_USEFUL_OFF_AXIS:
+        quality_issues.append("SEVERE_POSE")
+    return ProbeFrame(-1, image, detection, score, yaw, pitch, sharpness, brightness, relative_size, tuple(quality_issues))
 
 
 def select_probe_frame(
@@ -121,7 +151,7 @@ def select_probe_frame(
     ambiguous frame is not a probe, and the counts of why frames were
     dropped are returned as evidence.
     """
-    rejected = {"no_face": 0, "multiple_faces": 0, "detector_error": 0}
+    rejected = {"no_face": 0, "multiple_faces": 0, "detector_error": 0, "poor_quality": 0}
     best: ProbeFrame | None = None
 
     for index, frame in enumerate(frames):
@@ -147,8 +177,13 @@ def select_probe_frame(
             candidate.yaw,
             candidate.pitch,
             candidate.sharpness,
+            candidate.brightness,
             candidate.relative_size,
+            candidate.quality_issues,
         )
+        if candidate.quality_issues:
+            rejected["poor_quality"] += 1
+            continue
         if best is None or candidate.score > best.score:
             best = candidate
 
@@ -157,5 +192,7 @@ def select_probe_frame(
         issues.append("NO_USABLE_PROBE_FRAME")
     if rejected["multiple_faces"]:
         issues.append("MULTIPLE_FACES_IN_SOME_FRAMES")
+    if rejected["poor_quality"]:
+        issues.append("POOR_QUALITY_FRAMES_SKIPPED")
 
     return ProbeSelection(best, len(frames), rejected, tuple(issues))

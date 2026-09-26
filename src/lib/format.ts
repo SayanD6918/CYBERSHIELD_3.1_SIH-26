@@ -1,4 +1,4 @@
-import type { Decision } from "./types.ts";
+import type { Decision, DocumentType } from "./types.ts";
 
 /** Partially masks a document number for display in lists and exports. */
 export function maskDocumentNumber(value: string): string {
@@ -55,5 +55,13 @@ export function decisionLabel(decision: Decision): string {
 
 export function titleCaseDocType(type: string): string {
   if (!type) return "Document";
-  return type.charAt(0).toUpperCase() + type.slice(1);
+  const labels: Partial<Record<DocumentType, string>> = {
+    passport: "Passport",
+    visa: "Visa",
+    permit: "Permit",
+    id: "ID",
+    aadhaar: "Aadhaar (UIDAI)",
+    unknown: "Unknown",
+  };
+  return labels[type as DocumentType] ?? type.charAt(0).toUpperCase() + type.slice(1);
 }

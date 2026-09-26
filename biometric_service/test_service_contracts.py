@@ -88,21 +88,31 @@ class DetectBoxesTests(unittest.TestCase):
 
 
 class ActiveChallengeEndpointTests(unittest.TestCase):
-    def test_unknown_challenge_fails_cleanly(self):
+    def test_unknown_challenge_sequence_fails_cleanly(self):
         result = main.active_challenge(
-            main.ActiveChallengeRequest(challenge="BACKFLIP", frames_data_urls=["x"])
+            main.ActiveChallengeRequest(
+                reference_frames_data_urls=["x"],
+                steps=[main.ActiveChallengeStep(action="BACKFLIP", frames_data_urls=["x"])],
+            )
         )
-        self.assertEqual(result["failure_reason"], "UNKNOWN_CHALLENGE")
+        self.assertEqual(result["failure_reason"], "INVALID_CHALLENGE_SEQUENCE")
 
-    def test_no_frames_fails_cleanly(self):
+    def test_no_reference_frames_fails_cleanly(self):
         result = main.active_challenge(
-            main.ActiveChallengeRequest(challenge="TURN_LEFT", frames_data_urls=[])
+            main.ActiveChallengeRequest(reference_frames_data_urls=[], steps=[])
         )
-        self.assertEqual(result["failure_reason"], "NO_FRAMES_PROVIDED")
+        self.assertEqual(result["failure_reason"], "NO_REFERENCE_FRAMES_PROVIDED")
 
     def test_a_challenge_never_reports_passed_without_a_detector(self):
         result = main.active_challenge(
-            main.ActiveChallengeRequest(challenge="TURN_LEFT", frames_data_urls=[data_url(frame())])
+            main.ActiveChallengeRequest(
+                reference_frames_data_urls=[data_url(frame())],
+                steps=[
+                    main.ActiveChallengeStep(action="TURN_LEFT", frames_data_urls=[data_url(frame())]),
+                    main.ActiveChallengeStep(action="TURN_RIGHT", frames_data_urls=[data_url(frame())]),
+                    main.ActiveChallengeStep(action="LOOK_STRAIGHT", frames_data_urls=[data_url(frame())]),
+                ],
+            )
         )
         self.assertNotEqual(result["challenge_status"], "PASSED")
 
@@ -167,6 +177,66 @@ class HealthTests(unittest.TestCase):
             self.assertFalse(health["liveness_model_loaded"])
             self.assertFalse(health["liveness_model_valid"])
 
+    def test_face_match_exposes_stage_diagnostics_without_a_model(self):
+        result = main.face_match(
+            main.FaceMatchRequest(
+                document_image_data_url=data_url(frame()),
+                live_frames_data_urls=[data_url(frame(130))],
+            )
+        )
+        self.assertEqual(result["metric"], "cosine_similarity")
+        self.assertIn("document_portrait", result)
+        self.assertIn("document", result)
+        self.assertIn("live", result)
+
+
+
+
+class ReplayContractTests(unittest.TestCase):
+    def test_duplicate_decoded_frames_are_detected(self):
+        frames = [frame(120), frame(120), frame(130)]
+        duplicates = main.duplicate_frame_indices(frames)
+        self.assertEqual(duplicates, [1])
+
+    def test_single_duplicate_frame_does_not_trigger_replay_failure(self):
+        frames = [frame(120), frame(120), frame(130), frame(140), frame(150)]
+        self.assertFalse(main.sustained_duplicate_replay(frames))
+
+    def test_sustained_duplicate_frames_trigger_replay_failure(self):
+        frames = [frame(120), frame(120), frame(120), frame(120), frame(130)]
+        self.assertTrue(main.sustained_duplicate_replay(frames))
+
+    def test_image_mime_type_is_restricted(self):
+        raw = base64.b64encode(b"not-an-image").decode()
+        with self.assertRaisesRegex(main.ImageDecodeError, "Unsupported image MIME type"):
+            main.decode_data_url(f"data:text/plain;base64,{raw}")
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestPhase2SecurityContracts(unittest.TestCase):
+    def test_base64_is_strict(self):
+        with self.assertRaises(main.ImageDecodeError):
+            main.decode_data_url("data:image/jpeg;base64,not-base64!!!")
+
+    def test_oversized_pixel_image_is_rejected(self):
+        image = np.zeros((5001, 5001, 3), dtype=np.uint8)
+        ok, encoded = cv2.imencode(".jpg", image)
+        assert ok
+        payload = "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode()
+        with self.assertRaisesRegex(main.ImageDecodeError, "pixels"):
+            main.decode_data_url(payload)
+
+class TestFrameLimits(unittest.TestCase):
+    def test_liveness_rejects_frame_bursts_above_limit(self):
+        frames = [data_url(np.zeros((32, 32, 3), dtype=np.uint8))] * (main.MAX_LIVENESS_FRAMES + 1)
+        result = main.liveness(main.ImageRequest(frames_data_urls=frames))
+        self.assertIn("TOO_MANY_FRAMES", result["issues"])
+
+    def test_face_match_rejects_probe_bursts_above_limit(self):
+        frames = [data_url(np.zeros((32, 32, 3), dtype=np.uint8))] * (main.MAX_PROBE_FRAMES + 1)
+        result = main.face_match(main.FaceMatchRequest(
+            document_image_data_url=frames[0],
+            live_frames_data_urls=frames,
+        ))
+        self.assertIn("TOO_MANY_FRAMES", result["issues"])

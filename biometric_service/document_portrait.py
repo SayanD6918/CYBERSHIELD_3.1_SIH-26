@@ -15,6 +15,7 @@ class DocumentLayout:
     orientation: int
     expected_regions: tuple[tuple[str, tuple[float, float, float, float], float], ...]
     issues: tuple[str, ...]
+    document_type: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -99,12 +100,39 @@ def _mrz_like(image: np.ndarray) -> bool:
     return runs >= 2
 
 
-def classify_document_layout(image: np.ndarray, orientation: int = 0) -> DocumentLayout:
+def classify_document_layout(image: np.ndarray, orientation: int = 0, document_type: str = "unknown") -> DocumentLayout:
     h, w = image.shape[:2]
     ratio = w / max(h, 1)
     issues: list[str] = []
 
-    if _mrz_like(image) and 1.15 <= ratio <= 1.9:
+    normalized_type = (document_type or "unknown").lower()
+    if normalized_type == "aadhaar":
+        # Aadhaar layouts vary across original cards, PVC cards and printed
+        # e-Aadhaar pages. These are location priors, not fixed crops: YuNet
+        # still evaluates the complete oriented image and each detected face
+        # is scored against several plausible portrait regions.
+        if ratio >= 1.20:
+            kind = "aadhaar_landscape"
+            regions = (
+                ("right_portrait", (0.50, 0.08, 0.45, 0.82), 0.78),
+                ("left_portrait", (0.05, 0.08, 0.42, 0.82), 0.70),
+                ("center_portrait", (0.27, 0.08, 0.46, 0.82), 0.54),
+            )
+        elif ratio <= 0.90:
+            kind = "aadhaar_portrait"
+            regions = (
+                ("upper_right_portrait", (0.48, 0.08, 0.47, 0.58), 0.72),
+                ("upper_left_portrait", (0.05, 0.08, 0.47, 0.58), 0.68),
+                ("middle_portrait", (0.18, 0.18, 0.64, 0.58), 0.52),
+            )
+        else:
+            kind = "aadhaar_square"
+            regions = (
+                ("right_portrait", (0.48, 0.08, 0.47, 0.78), 0.72),
+                ("left_portrait", (0.05, 0.08, 0.47, 0.78), 0.68),
+                ("center_portrait", (0.20, 0.08, 0.60, 0.78), 0.50),
+            )
+    elif _mrz_like(image) and 1.15 <= ratio <= 1.9:
         kind = "passport_style"
         regions = (
             ("right_portrait", (0.52, 0.10, 0.43, 0.72), 0.78),
@@ -131,7 +159,7 @@ def classify_document_layout(image: np.ndarray, orientation: int = 0) -> Documen
         regions = ()
         issues.append("UNUSUAL_DOCUMENT_LAYOUT")
 
-    return DocumentLayout(kind, orientation, tuple(regions), tuple(issues))
+    return DocumentLayout(kind, orientation, tuple(regions), tuple(issues), normalized_type)
 
 
 def _inside_region(box: tuple[float, float, float, float], region: tuple[float, float, float, float], image_shape: tuple[int, ...]) -> bool:
@@ -198,7 +226,17 @@ def _score_candidate(image: np.ndarray, detection: FaceDetection, layout: Docume
     detection_score = float(detection.confidence)
     sharpness = float(quality["sharpness"] or 0.0)
     sharpness_score = min(1.0, sharpness / 150.0)
-    score = 0.48 * region_score + 0.22 * detection_score + 0.18 * size_score + 0.12 * sharpness_score
+    brightness = float(quality["brightness"] or 0.0)
+    brightness_score = max(0.0, 1.0 - abs(brightness - 128.0) / 128.0)
+    crop_margin_score = 0.0 if "POOR_CROP_MARGIN" in issues else 1.0
+    score = (
+        0.48 * region_score
+        + 0.20 * detection_score
+        + 0.14 * size_score
+        + 0.10 * sharpness_score
+        + 0.04 * brightness_score
+        + 0.04 * crop_margin_score
+    )
     if "FACE_TOO_SMALL" in issues:
         score -= 0.25
     if "POOR_CROP_MARGIN" in issues:
@@ -212,13 +250,14 @@ def extract_document_portrait(
     image: np.ndarray,
     detector: YuNetDetector,
     *,
+    document_type: str = "unknown",
     # Floor for a detection to be scored at all. The YuNet instance already
     # applies its own (higher) threshold, so this is a backstop for callers
     # that pass a more permissive detector.
     min_confidence: float = 0.75,
 ) -> DocumentPortraitResult:
     if image is None or image.size == 0:
-        layout = classify_document_layout(np.zeros((1, 1, 3), dtype=np.uint8))
+        layout = classify_document_layout(np.zeros((1, 1, 3), dtype=np.uint8), document_type=document_type)
         return DocumentPortraitResult("uncertain", 0, None, None, "document-layout + face-detection", layout, (), ("INVALID_IMAGE",), None)
 
     original_shape = image.shape
@@ -227,7 +266,7 @@ def extract_document_portrait(
 
     for orientation in (0, 90, 180, 270):
         oriented = _rotate(image, orientation)
-        layout = classify_document_layout(oriented, orientation)
+        layout = classify_document_layout(oriented, orientation, document_type=document_type)
         try:
             detections = detector.detect(oriented)
         except FaceModelError:
@@ -243,8 +282,13 @@ def extract_document_portrait(
 
     # Prefer an orientation that actually produced candidates; otherwise a
     # negative quality score could cause an empty rotation to win.
+    orientation_bias = {0: 0.0, 90: 0.001, 180: 0.002, 270: 0.003}
     best_score, orientation, layout, mapped_detections, candidates = max(
-        orientation_results, key=lambda item: (1 if item[4] else 0, item[0])
+        orientation_results,
+        key=lambda item: (
+            1 if item[4] else 0,
+            round(item[0] - orientation_bias[item[1]], 8),
+        ),
     )
     face_count = len(mapped_detections)
     issues = list(layout.issues)
@@ -272,6 +316,18 @@ def extract_document_portrait(
     issues.extend(selected_candidate.issues)
 
     # A document portrait is not accepted merely because it is the only detected face.
+    # The score combines location prior, YuNet confidence, face size, sharpness,
+    # brightness and crop margin. A hard floor prevents weak candidates from
+    # becoming SFace input merely because no better face exists.
+    if selected_candidate.score < 0.55:
+        return DocumentPortraitResult(
+            "uncertain", face_count, None, selected_candidate.score,
+            "document-layout + candidate scoring + quality validation",
+            layout, tuple(candidates),
+            tuple(dict.fromkeys([*issues, "PORTRAIT_SCORE_BELOW_THRESHOLD"])),
+            max(0.0, min(1.0, selected_candidate.score)),
+        )
+
     hard_failures = {"FACE_TOO_SMALL", "POOR_CROP_MARGIN", "BLURRY_FACE"}
     if hard_failures.intersection(selected_candidate.issues) or not selected_candidate.in_expected_region:
         return DocumentPortraitResult(

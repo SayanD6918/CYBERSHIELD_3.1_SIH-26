@@ -59,7 +59,9 @@ rather than guessing when the document is ambiguous or the crop is poor.
 figure. It is **not calibrated for a document-to-camera population**, and
 `/health` and every response say so via `calibrated: false`.
 `FACE_UNCERTAIN_BAND` (`0.05`) is an application policy band, not a
-statistical interval.
+statistical interval. A score at or above `threshold + band` is MATCH; a
+score at or below `threshold - band` is NO_MATCH; scores between those
+boundaries are UNCERTAIN.
 
 A cosine similarity is a similarity measurement. Responses carry the raw
 score, the metric, the threshold, the model and its version so the caller can
@@ -160,3 +162,15 @@ or pixel-correlation matching.
 
 No model weights, no pytest, no FastAPI install needed: `_stubs/fastapi_stub.py`
 stands in for the framework so endpoint contracts are still covered.
+
+
+## Submission mode
+
+The current integrated verification UI invokes `/api/active-challenge`, `/api/liveness`, and `/api/face-match` as one coherent biometric session. PAD and challenge evidence are fused by the verification risk engine. This still is not an authoritative identity verification system and must not be described as such.
+
+
+## Face-match diagnostic contract
+
+`POST /api/face-match` is fail-closed. `similarity_score` is `null` unless a document SFace embedding and a live SFace embedding were both generated and `compare()` completed successfully. The response includes `document.embedding_ready`, `live.embedding_ready`, `live.frames_received`, `live.frames_with_face`, `live.frames_rejected`, `live.best_frame_index`, and `live.best_frame_quality`.
+
+`GET /health` reports the configured YuNet/SFace paths, artifact existence, SHA-256, and runtime loaded/error state.

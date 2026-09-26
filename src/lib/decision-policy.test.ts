@@ -42,13 +42,18 @@ function complete(overrides: Partial<RiskEvidenceBundle> = {}): RiskEvidenceBund
 }
 
 describe("watchlist routing", () => {
-  it("sends a watchlist hit to MANUAL_REVIEW even alongside a hard failure", () => {
-    // Closing the case as NOT_VERIFIED would mean no human ever looks at a
-    // watchlisted subject, which defeats the point of the watchlist.
+  it("keeps a hard biometric failure ahead of watchlist routing", () => {
     const result = calculateRisk(
       complete({ watchlistHit: true, face: { ...complete().face, status: "fail" } }),
     );
-    assert.equal(result.finalDecision, "MANUAL_REVIEW");
+    assert.equal(result.finalDecision, "NOT_VERIFIED");
+  });
+
+  it("keeps a confirmed PAD spoof ahead of watchlist routing", () => {
+    const result = calculateRisk(
+      complete({ watchlistHit: true, liveness: { ...complete().liveness, status: "fail" } }),
+    );
+    assert.equal(result.finalDecision, "NOT_VERIFIED");
   });
 
   it("holds a watchlist hit when auto-hold is on", () => {
@@ -74,6 +79,20 @@ describe("watchlist routing", () => {
 
   it("does not change the lane for a clean case", () => {
     assert.equal(calculateRisk(complete({ autoHoldWatchlist: true })).decision, "safe");
+  });
+
+  it("puts document hard failure ahead of watchlist manual review", () => {
+    assert.equal(
+      calculateRisk(complete({ watchlistHit: true, document: { ...complete().document, status: "fail" } })).finalDecision,
+      "NOT_VERIFIED",
+    );
+  });
+
+  it("keeps watchlist routing for non-hard review evidence", () => {
+    assert.equal(
+      calculateRisk(complete({ watchlistHit: true, liveness: { ...complete().liveness, status: "review" } })).finalDecision,
+      "MANUAL_REVIEW",
+    );
   });
 });
 

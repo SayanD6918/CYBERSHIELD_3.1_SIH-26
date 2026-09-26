@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { initialsFromName, maskDocumentNumber, formatCaseTime, decisionLabel } from "./format.ts";
+import { initialsFromName, maskDocumentNumber, formatCaseTime, decisionLabel, titleCaseDocType } from "./format.ts";
 
 describe("display formatting", () => {
   it("masks all but the first and last characters of a document number", () => {
@@ -27,6 +27,11 @@ describe("display formatting", () => {
 
   it("falls back for an unparseable timestamp", () => {
     assert.equal(formatCaseTime("not-a-date"), "just now");
+  });
+
+  it("labels Aadhaar as Aadhaar (UIDAI)", () => {
+    assert.equal(titleCaseDocType("aadhaar"), "Aadhaar (UIDAI)");
+    assert.equal(titleCaseDocType("passport"), "Passport");
   });
 
   it("labels each decision lane", () => {

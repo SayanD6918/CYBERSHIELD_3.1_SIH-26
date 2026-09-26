@@ -77,4 +77,34 @@ describe("PASS 7 evidence fusion", () => {
     const result = calculateRisk(evidence({ watchlistHit: true }));
     assert.equal(result.finalDecision, "MANUAL_REVIEW");
   });
+  it("treats a confirmed PAD spoof as a hard presentation-attack failure", () => {
+    const result = calculateRisk(evidence({
+      liveness: { ...evidence().liveness, status: "fail", issues: ["PAD_SPOOF"] },
+    }));
+    assert.equal(result.finalDecision, "NOT_VERIFIED");
+    assert.match(result.reasons.join(" "), /presentation attack/i);
+  });
+
+  it("keeps uncertain PAD in review rather than labeling it spoof", () => {
+    const result = calculateRisk(evidence({
+      liveness: { ...evidence().liveness, status: "review", issues: ["PAD_UNCERTAIN"] },
+    }));
+    assert.equal(result.finalDecision, "UNCERTAIN");
+    assert.doesNotMatch(result.reasons.join(" "), /presentation attack detected/i);
+  });
+
+  it("requires the active challenge when challenge mode is enabled", () => {
+    const result = calculateRisk(evidence({
+      challenge: { ...evidence().challenge, status: "review", challengeStatus: "NOT_RUN", issues: ["CHALLENGE_NOT_RUN"] },
+    }));
+    assert.equal(result.finalDecision, "UNCERTAIN");
+  });
+
+  it("treats an explicit challenge rejection as a hard required-check failure", () => {
+    const result = calculateRisk(evidence({
+      challenge: { ...evidence().challenge, status: "fail", challengeStatus: "FAILED", issues: ["CONTRADICTORY_MOVEMENT"] },
+    }));
+    assert.equal(result.finalDecision, "NOT_VERIFIED");
+  });
+
 });

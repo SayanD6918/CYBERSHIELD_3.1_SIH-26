@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import cv2
+import hashlib
 import joblib
+import os
 import numpy as np
 
 # Bumped from "legacy-ycrcb-luv-hist-v1" when PAD moved from whole frames to
@@ -238,8 +240,33 @@ def load_pad_model(path: Path) -> tuple[Any | None, PadModelInfo]:
             ("MODEL_FILE_NOT_FOUND",),
         )
 
+    # joblib/pickle is executable deserialization. Only deployment artifacts
+    # explicitly trusted by configuration may be loaded. The hash is checked
+    # before deserialization so an attacker cannot replace the artifact and
+    # have the service execute it.
+    resolved = path.resolve()
+    allowed_root = (Path(__file__).resolve().parent / "models").resolve()
+    allow_external = os.getenv("ALLOW_EXTERNAL_MODEL_PATH", "0") == "1"
+    if not allow_external:
+        try:
+            resolved.relative_to(allowed_root)
+        except ValueError:
+            return None, PadModelInfo(
+                False, False, "CyberShield-PAD", "rejected-path", FEATURE_VERSION, {}, False,
+                ("MODEL_PATH_OUTSIDE_TRUSTED_DIRECTORY",),
+            )
+
+    expected_sha256 = os.getenv("PAD_MODEL_SHA256", "").strip().lower()
+    if expected_sha256:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != expected_sha256:
+            return None, PadModelInfo(
+                False, False, "CyberShield-PAD", "hash-mismatch", FEATURE_VERSION, {}, False,
+                ("MODEL_SHA256_MISMATCH",),
+            )
+
     try:
-        artifact = joblib.load(path)
+        artifact = joblib.load(resolved)
     except Exception as exc:
         return None, PadModelInfo(
             False, False, "CyberShield-PAD", "load-error", FEATURE_VERSION, {}, False,

@@ -1,7 +1,8 @@
-import { validateTD3MRZ, type MRZValidationResult } from "./mrz-validator";
+import { validateTD3MRZ, type MRZValidationResult } from "./mrz-validator.ts";
+import type { DocumentType } from "./types.ts";
 
 export type ParsedDocument = {
-  documentType: "passport" | "visa" | "permit" | "id" | "unknown";
+  documentType: DocumentType;
   documentNumber: string | null;
   holderName: string | null;
   nationality: string | null;
@@ -10,6 +11,7 @@ export type ParsedDocument = {
   expiryStatus: "valid" | "expired" | "unknown";
   mrz: MRZValidationResult | null;
   flags: string[];
+  aadhaarNumberStatus: "full" | "masked" | "not_detected";
 };
 
 const MONTHS: Record<string, string> = {
@@ -54,6 +56,100 @@ function findTD3(lines: string[]): [string, string] | null {
   return null;
 }
 
+
+
+function normalizeOcrText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[|]/g, "i")
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/[\u00a0]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractAadhaarNumber(text: string): { value: string | null; status: "full" | "masked" | "not_detected" } {
+  const normalized = normalizeOcrText(text);
+
+  // Prefer grouped forms because they are common in printed/PVC/e-Aadhaar
+  // documents and are less likely to accidentally join unrelated digits.
+  const groupedFull = normalized.match(/(?<!\d)(\d{4})[ -]?(\d{4})[ -]?(\d{4})(?!\d)/);
+  if (groupedFull) {
+    return {
+      value: `XXXX-XXXX-${groupedFull[3]}`,
+      status: "full",
+    };
+  }
+
+  // Masked Aadhaar is evidence of an Aadhaar number field, not a complete
+  // Aadhaar number. Preserve only the masked representation.
+  const masked = normalized.match(
+    /(?<![a-z0-9])(?:x{4}|\*{4}|•{4})[ -]?(?:x{4}|\*{4}|•{4})[ -]?(\d{4}|x{4}|\*{4}|•{4})(?![a-z0-9])/i,
+  );
+  if (masked) {
+    const last = /^\d{4}$/.test(masked[1]) ? masked[1] : "XXXX";
+    return { value: `XXXX-XXXX-${last}`, status: "masked" };
+  }
+
+  // OCR sometimes removes the separators entirely.
+  const compactFull = normalized.match(/(?<!\d)(\d{12})(?!\d)/);
+  if (compactFull) {
+    return {
+      value: `XXXX-XXXX-${compactFull[1].slice(-4)}`,
+      status: "full",
+    };
+  }
+
+  return { value: null, status: "not_detected" };
+}
+
+function aadhaarSignals(text: string): { score: number; signals: string[]; numberStatus: "full" | "masked" | "not_detected"; maskedNumber: string | null } {
+  const normalized = normalizeOcrText(text);
+  const signals: string[] = [];
+  let score = 0;
+
+  // Tesseract can distort the exact word, so accept common OCR variants
+  // rather than requiring one literal "Aadhaar" token.
+  if (/\ba+d+h+[a4]{1,2}r\b/i.test(normalized) || /a+d+h+[a4]{1,2}r/i.test(normalized)) {
+    score += 3;
+    signals.push("AADHAAR_TEXT");
+  }
+  if (/unique\s+identification\s+authority\s+of\s+india/i.test(normalized) || /u+i+d+a+i/i.test(normalized)) {
+    score += 3;
+    signals.push("UIDAI_MARKER");
+  }
+  if (/आधार/u.test(text)) {
+    score += 3;
+    signals.push("AADHAAR_HINDI");
+  }
+  if (/government\s+of\s+india/i.test(normalized) || /gov(?:ernment)?\s+of\s+india/i.test(normalized)) {
+    score += 1;
+    signals.push("GOVERNMENT_OF_INDIA");
+  }
+
+  const number = extractAadhaarNumber(text);
+  if (number.status === "full") {
+    score += 2;
+    signals.push("AADHAAR_NUMBER_FORMAT");
+  } else if (number.status === "masked") {
+    score += 2;
+    signals.push("MASKED_AADHAAR_NUMBER");
+  }
+
+  return {
+    score,
+    signals,
+    numberStatus: number.status,
+    maskedNumber: number.value,
+  };
+}
+
+export function maskAadhaarNumber(value: string): string {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length !== 12) return value;
+  return `XXXX-XXXX-${digits.slice(-4)}`;
+}
+
 function expiryStatus(expiryDate: string | null): "valid" | "expired" | "unknown" {
   if (!expiryDate) return "unknown";
   const expiry = new Date(`${expiryDate}T23:59:59`);
@@ -65,13 +161,23 @@ export function parseDocumentText(text: string): ParsedDocument {
   const normalizedText = text.replace(/[|]/g, "I").replace(/\r/g, "").trim();
   const lines = normalizedText.split("\n").map((line) => line.trim()).filter(Boolean);
 
+  const aadhaar = aadhaarSignals(normalizedText);
   let documentType: ParsedDocument["documentType"] = "unknown";
+
+  // Passport/MRZ recognition remains authoritative for passport-shaped OCR.
+  // Aadhaar is selected from several independent signals so one noisy OCR
+  // token cannot manufacture an Aadhaar classification.
   if (/\bpassport\b/i.test(normalizedText)) documentType = "passport";
   else if (/\bvisa\b/i.test(normalizedText)) documentType = "visa";
   else if (/\bpermit\b/i.test(normalizedText)) documentType = "permit";
+  else if (aadhaar.score >= 3) documentType = "aadhaar";
+  else if (/\b(?:national\s+identity\s+card|identity\s+card|id\s+card)\b/i.test(normalizedText)) documentType = "id";
   else if (lines.some((line) => /^P<[A-Z<]{3}/i.test(line.replace(/\s+/g, "")))) documentType = "passport";
 
-  let documentNumber = fieldValue(lines, /(?:No\.?|Number|Document\s*No\.?)\s*[:#]?\s*([A-Z0-9<-]+)/i);
+  let documentNumber =
+    documentType === "aadhaar"
+      ? aadhaar.maskedNumber
+      : fieldValue(lines, /(?:No\.?|Number|Document\s*No\.?)\s*[:#]?\s*([A-Z0-9<-]+)/i);
   const surname = fieldValue(lines, /Surname\s*[:#]?\s*(.+)$/i);
   const givenNames = fieldValue(lines, /Given\s+names?\s*[:#]?\s*(.+)$/i);
   let holderName = surname || givenNames ? [surname, givenNames].filter(Boolean).join(" ").trim() : null;
@@ -120,5 +226,6 @@ export function parseDocumentText(text: string): ParsedDocument {
     expiryStatus: expiryStatus(expiryDate),
     mrz,
     flags,
+    aadhaarNumberStatus: documentType === "aadhaar" ? aadhaar.numberStatus : "not_detected",
   };
 }

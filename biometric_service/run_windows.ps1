@@ -5,6 +5,7 @@ if (-not (Test-Path ".venv")) { python -m venv .venv }
 
 & .\.venv\Scripts\python.exe -m pip install --quiet --upgrade pip
 & .\.venv\Scripts\python.exe -m pip install --quiet -r requirements.txt
+& .\.venv\Scripts\python.exe .\download_face_models.py
 
 # Loopback by default: the service accepts unauthenticated image uploads.
 $listenHost = if ($env:BIOMETRIC_HOST) { $env:BIOMETRIC_HOST } else { "127.0.0.1" }

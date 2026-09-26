@@ -6,6 +6,8 @@ export type CheckStatus = "passed" | "review" | "fail" | "unavailable";
 
 export type EvidenceStatus = CheckStatus | "unknown";
 
+export type DocumentType = "passport" | "visa" | "permit" | "id" | "aadhaar" | "unknown";
+
 export type EvidenceBase = {
   status: EvidenceStatus;
   confidence: number | null;
@@ -14,8 +16,9 @@ export type EvidenceBase = {
 };
 
 export type DocumentEvidence = EvidenceBase & {
-  documentType: string | null;
+  documentType: DocumentType | null;
   documentNumber: string | null;
+  aadhaarNumberStatus?: "full" | "masked" | "not_detected";
   quality?: {
     width: number | null;
     height: number | null;
@@ -126,6 +129,7 @@ export type BiometricResult = {
   faceSimilarity: number | null;
   faceThreshold: number;
   challenge?: string;
+  liveCaptureStatus?: "CAPTURED" | "UNCERTAIN";
   evidence?: {
     face?: FaceEvidence;
     liveness?: LivenessEvidence;
@@ -138,7 +142,7 @@ export type CaseRecord = {
   finalDecision?: FinalDecision;
   id: string;
   createdAt: string;
-  documentType: string;
+  documentType: DocumentType;
   documentNumber: string;
   holderName: string | null;
   nationality: string | null;

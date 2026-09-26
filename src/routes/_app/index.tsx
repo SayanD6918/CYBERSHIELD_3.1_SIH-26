@@ -132,7 +132,7 @@ function OverviewPage() {
           <CardHeader>
             <CardTitle>Start a verification</CardTitle>
             <CardDescription>
-              Scan a passport, visa, or permit to run an explainable risk check.
+              Scan a passport, visa, permit, Aadhaar (UIDAI), or ID to run an explainable risk check.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">

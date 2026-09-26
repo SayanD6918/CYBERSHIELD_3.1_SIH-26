@@ -46,12 +46,14 @@ export function finalizeVerification(
     similarity: biometric.faceSimilarity, threshold: biometric.faceThreshold, source: "comparison",
   };
   const liveness: LivenessEvidence = biometric.evidence?.liveness ?? {
-    status: biometric.livenessStatus === "LIVE" ? "passed" : biometric.livenessStatus === "SPOOF" ? "fail" : "unavailable",
-    confidence: biometric.livenessConfidence, method: "Passive PAD", issues: [],
+    status: biometric.livenessStatus === "LIVE" ? "passed" : biometric.livenessStatus === "SPOOF" ? "fail" : "review",
+    confidence: biometric.livenessConfidence,
+    method: "Passive PAD",
+    issues: ["Passive PAD evidence was not returned by the biometric service"],
     livenessConfidence: biometric.livenessConfidence, spoofProbability: null, source: "passive",
   };
   const challenge: ChallengeEvidence = biometric.evidence?.challenge ?? {
-    status: "unavailable", confidence: null, method: "Active challenge unavailable", issues: ["Active challenge unavailable"],
+    status: "review", confidence: null, method: "Active challenge evidence unavailable", issues: ["Active challenge evidence unavailable"],
     challenge: biometric.challenge ?? null, completed: false, challengeStatus: "NOT_RUN", measurements: {}, source: "active",
   };
   const identity: IdentityEvidence = {
@@ -91,8 +93,9 @@ export function finalizeVerification(
     ...record.checks.filter((c) => !["face", "liveness", "active-challenge", "database", "mrz"].includes(c.id)),
     { id: "mrz", label: "MRZ validation", status: mrz.status === "unknown" ? "review" : mrz.status, detail: mrz.issues.length ? mrz.issues.join("; ") : mrz.detected ? "ICAO check digits and field consistency evaluated" : "Not detected" },
     { id: "face", label: "Face match", status: face.status === "unknown" ? "review" : face.status, detail: face.similarity == null ? "No similarity score" : `Similarity ${face.similarity.toFixed(4)} · distance ${face.distance == null ? "—" : face.distance.toFixed(4)}` },
-    { id: "liveness", label: "Passive liveness", status: liveness.status === "unknown" ? "review" : liveness.status, detail: liveness.livenessConfidence == null ? "No confidence" : `Classifier confidence ${liveness.livenessConfidence.toFixed(2)} (uncalibrated)` },
-    { id: "active-challenge", label: "Active challenge", status: challenge.status === "unknown" ? "review" : challenge.status, detail: challenge.failureReason ?? (challenge.challengeStatus === "PASSED" ? "Movement verified" : "Not confirmed") },
+    { id: "liveness", label: "Passive PAD", status: liveness.status === "unknown" ? "review" : liveness.status, detail: liveness.issues.length ? liveness.issues.join("; ") : "Passive presentation-attack detection completed." },
+    { id: "active-challenge", label: "Active challenge", status: challenge.status === "unknown" ? "review" : challenge.status, detail: challenge.challengeStatus === "PASSED" ? "Head-pose challenge passed." : challenge.issues.length ? challenge.issues.join("; ") : "Challenge evidence was not confirmed." },
+    { id: "live-capture", label: "Live face capture", status: biometric.liveCaptureStatus === "CAPTURED" ? "passed" : "review", detail: biometric.liveCaptureStatus === "CAPTURED" ? "Multi-frame camera capture contained one usable face." : "Live face capture was not fully confirmed." },
     { id: "identity", label: "Identity record", status: identity.status === "unknown" ? "review" : identity.status, detail: `${identity.provider} · ${identity.authoritative ? "authoritative" : "not authoritative"}` },
     { id: "watchlist", label: "Watchlist", status: record.watchlistHit ? "fail" : "passed", detail: record.watchlistHit ? "Potential match detected" : "No configured watchlist match" },
   ];

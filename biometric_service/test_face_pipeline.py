@@ -77,6 +77,45 @@ class FacePipelineTests(unittest.TestCase):
         self.assertEqual(result.face_count, 0)
         self.assertIn("NO_FACE", result.issues)
 
+    def test_aadhaar_layout_uses_multiple_portrait_priors(self):
+        image = np.random.default_rng(12).integers(0, 255, (600, 900, 3), dtype=np.uint8)
+        detections = [
+            fake_face((70, 500, 260, 100)),
+            fake_face((610, 160, 120, 150)),
+        ]
+        result = extract_document_portrait(
+            image,
+            FakeDocumentDetector({(900, 600): detections}),
+            document_type="aadhaar",
+        )
+        self.assertEqual(result.status, "selected")
+        self.assertEqual(result.layout.document_type, "aadhaar")
+        self.assertEqual(result.layout.kind, "aadhaar_landscape")
+        self.assertAlmostEqual(result.selected.box[0], 610, delta=1)
+
+    def test_aadhaar_no_face_is_explicitly_uncertain(self):
+        image = np.random.default_rng(13).integers(0, 255, (600, 900, 3), dtype=np.uint8)
+        result = extract_document_portrait(
+            image, FakeDocumentDetector({}), document_type="aadhaar"
+        )
+        self.assertEqual(result.status, "uncertain")
+        self.assertIn("NO_FACE", result.issues)
+        self.assertEqual(result.layout.document_type, "aadhaar")
+
+    def test_aadhaar_multiple_plausible_faces_fails_safely(self):
+        image = np.random.default_rng(14).integers(0, 255, (600, 900, 3), dtype=np.uint8)
+        detections = [
+            fake_face((570, 150, 130, 160)),
+            fake_face((700, 155, 120, 155)),
+        ]
+        result = extract_document_portrait(
+            image,
+            FakeDocumentDetector({(900, 600): detections}),
+            document_type="aadhaar",
+        )
+        self.assertEqual(result.status, "uncertain")
+        self.assertIn("MULTIPLE_PLAUSIBLE_FACES", result.issues)
+
     def test_document_portrait_prefers_expected_region_not_largest_face(self):
         image = np.random.default_rng(7).integers(0, 255, (600, 900, 3), dtype=np.uint8)
         # Larger face on the left; smaller face in the expected right portrait region.
@@ -161,10 +200,21 @@ class FacePipelineTests(unittest.TestCase):
 
     def test_match_states_are_explicit(self):
         recognizer = FaceRecognizer("/definitely/missing/sface.onnx", match_threshold=0.8, uncertain_band=0.05)
-        self.assertEqual(recognizer.classify(0.90, []), "MATCH")
-        self.assertEqual(recognizer.classify(0.78, []), "UNCERTAIN")
-        self.assertEqual(recognizer.classify(0.70, []), "NO_MATCH")
-        self.assertEqual(recognizer.classify(0.95, ["BLURRY_FACE"]), "UNCERTAIN")
+        self.assertEqual(recognizer.classify(0.85, []), "MATCH")
+        self.assertEqual(recognizer.classify(0.80, []), "UNCERTAIN")
+        self.assertEqual(recognizer.classify(0.75, []), "NO_MATCH")
+        self.assertEqual(recognizer.classify(0.85, ["BLURRY_FACE"]), "UNCERTAIN")
+
+    def test_match_threshold_boundary_is_uncertain_band_aware(self):
+        recognizer = FaceRecognizer("/definitely/missing/sface.onnx", match_threshold=0.363, uncertain_band=0.05)
+        self.assertEqual(recognizer.classify(0.413, []), "MATCH")
+        self.assertEqual(recognizer.classify(0.313, []), "NO_MATCH")
+        self.assertEqual(recognizer.classify(0.363, []), "UNCERTAIN")
+
+    def test_embedding_dimension_mismatch_fails_explicitly(self):
+        recognizer = FaceRecognizer("/definitely/missing/sface.onnx")
+        with self.assertRaises(Exception):
+            recognizer.compare(np.ones(128, dtype=np.float32), np.ones(512, dtype=np.float32))
 
 
 class AlignmentRowTests(unittest.TestCase):
@@ -280,7 +330,8 @@ class ProbeFrameSelectionTests(unittest.TestCase):
             return list(self.detections_by_index.get(index, []))
 
     def burst(self, count=6):
-        return [np.full((480, 640, 3), 120, np.uint8) for _ in range(count)]
+        rng = np.random.default_rng(123)
+        return [np.clip(120 + rng.normal(0, 18, (480, 640, 3)), 0, 255).astype(np.uint8) for _ in range(count)]
 
     def test_frontal_frame_wins_over_the_last_frame(self):
         frames = self.burst(4)
